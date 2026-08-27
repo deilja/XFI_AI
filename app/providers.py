@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from .metrics import record
+
 
 @dataclass(frozen=True)
 class Provider:
@@ -15,6 +17,7 @@ class Provider:
     model_env: str
     default_model: str
     priority: int
+    free: bool = False
 
     @property
     def key(self) -> str:
@@ -28,12 +31,13 @@ class Provider:
 PROVIDERS = [
     Provider("groq", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "GROQ_MODEL", "openai/gpt-oss-120b", 1),
     Provider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "GEMINI_API_KEY", "GEMINI_MODEL", "gemini-2.5-flash", 2),
-    Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "openrouter/free", 3),
-    Provider("mistral", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "MISTRAL_MODEL", "mistral-small-latest", 4),
-    Provider("sambanova", "https://api.sambanova.ai/v1/chat/completions", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct", 5),
-    Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "gpt-oss-120b", 6),
-    Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest", 7),
-    Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 8),
+    Provider("cloudflare", "https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_MODEL", "@cf/meta/llama-3.1-8b-instruct", 3, True),
+    Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "openrouter/free", 4, True),
+    Provider("mistral", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "MISTRAL_MODEL", "mistral-small-latest", 5),
+    Provider("sambanova", "https://api.sambanova.ai/v1/chat/completions", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct", 6),
+    Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "gpt-oss-120b", 7),
+    Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest", 8, True),
+    Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 9),
 ]
 
 _state: dict[str, dict[str, float]] = {}
@@ -59,12 +63,22 @@ def _record(p: Provider, ok: bool, latency: float, status: int | None = None) ->
         s["failures"] = max(0, s.get("failures", 0) - 1)
         s["latency"] = latency
         s["cooldown_until"] = 0
-        return
-    s["failures"] = s.get("failures", 0) + 1
-    if status == 429:
-        s["cooldown_until"] = time.time() + min(300, 15 * s["failures"])
-    elif status and status >= 500:
-        s["cooldown_until"] = time.time() + min(60, 5 * s["failures"])
+    else:
+        s["failures"] = s.get("failures", 0) + 1
+        if status in (401, 403):
+            s["cooldown_until"] = time.time() + 900
+        elif status == 429:
+            s["cooldown_until"] = time.time() + min(300, 15 * s["failures"])
+        elif status and status >= 500:
+            s["cooldown_until"] = time.time() + min(60, 5 * s["failures"])
+    record(p.name, ok, latency * 1000, status or 599)
+
+
+def _url(p: Provider) -> str:
+    if p.name == "cloudflare":
+        account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+        return p.url.format(account=account)
+    return p.url
 
 
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
@@ -79,17 +93,18 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
             try:
                 payload: dict[str, Any] = json.loads(body)
                 payload["model"] = provider.model
-                response = await client.post(provider.url, headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=payload)
+                response = await client.post(_url(provider), headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=payload)
                 latency = time.monotonic() - started
                 last_response = response
                 if response.status_code < 400:
                     _record(provider, True, latency, response.status_code)
                     return response, provider.name
-                if response.status_code not in (408, 409, 429, 500, 502, 503, 504):
+                if response.status_code not in (400, 401, 403, 408, 409, 429, 500, 502, 503, 504):
                     return response, provider.name
                 _record(provider, False, latency, response.status_code)
             except (httpx.HTTPError, ValueError) as exc:
-                _record(provider, False, time.monotonic() - started)
+                latency = time.monotonic() - started
+                _record(provider, False, latency)
                 last_error = exc
     if last_response is not None:
         return last_response, providers[-1].name
