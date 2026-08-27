@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XFI AI Gateway</title>
+<style>
+body{margin:0;background:#0b1020;color:#e8ecf7;font:16px system-ui,sans-serif;display:grid;place-items:center;min-height:100vh}
+.card{width:min(560px,92vw);background:#121a2d;border:1px solid #263452;border-radius:18px;padding:28px;box-sizing:border-box;box-shadow:0 20px 60px #0006}
+h1{margin-top:0}p{color:#aeb8ce;line-height:1.5}label{display:block;margin:16px 0 7px;color:#cbd4e8}input,button{width:100%;box-sizing:border-box;padding:13px;border-radius:10px;border:1px solid #34415f;background:#0b1222;color:#fff;font-size:15px}button{margin-top:18px;background:#315efb;border:0;cursor:pointer}.key{margin-top:20px;padding:15px;background:#09101d;border-radius:10px;word-break:break-all;display:none}.muted{font-size:13px}
+</style>
+</head>
+<body><main class="card">
+<h1>XFI AI Gateway</h1>
+<p>OpenAI-compatible шлюз к Groq. Секретный GROQ_API_KEY хранится только на VPS. Клиентам выдаются отдельные XFI API keys.</p>
+<label>Имя клиента</label><input id="name" placeholder="XFI Support Bot">
+<label>Административный ключ</label><input id="admin" type="password" autocomplete="off">
+<button onclick="issue()">Создать API key</button>
+<div id="out" class="key"></div>
+<p class="muted">После создания ключ показывается один раз. Не публикуйте его и не передавайте в Git.</p>
+<script>
+async function issue(){
+ const out=document.getElementById('out');out.style.display='none';
+ const r=await fetch('/api/keys',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Key':document.getElementById('admin').value},body:JSON.stringify({name:document.getElementById('name').value||'client'})});
+ const d=await r.json(); if(!r.ok){out.textContent=d.detail||'Ошибка';out.style.display='block';return}
+ out.textContent=d.api_key;out.style.display='block';
+}
+</script></main></body></html>
