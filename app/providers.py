@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,7 @@ class Provider:
     key_env: str
     model_env: str
     default_model: str
+    priority: int
 
     @property
     def key(self) -> str:
@@ -24,15 +26,17 @@ class Provider:
 
 
 PROVIDERS = [
-    Provider("groq", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "GROQ_MODEL", "openai/gpt-oss-120b"),
-    Provider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "GEMINI_API_KEY", "GEMINI_MODEL", "gemini-2.5-flash"),
-    Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "openrouter/free"),
-    Provider("mistral", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "MISTRAL_MODEL", "mistral-small-latest"),
-    Provider("sambanova", "https://api.sambanova.ai/v1/chat/completions", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct"),
-    Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "gpt-oss-120b"),
-    Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest"),
-    Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025"),
+    Provider("groq", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "GROQ_MODEL", "openai/gpt-oss-120b", 1),
+    Provider("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "GEMINI_API_KEY", "GEMINI_MODEL", "gemini-2.5-flash", 2),
+    Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "openrouter/free", 3),
+    Provider("mistral", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "MISTRAL_MODEL", "mistral-small-latest", 4),
+    Provider("sambanova", "https://api.sambanova.ai/v1/chat/completions", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct", 5),
+    Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "gpt-oss-120b", 6),
+    Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest", 7),
+    Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 8),
 ]
+
+_state: dict[str, dict[str, float]] = {}
 
 
 def configured_providers() -> list[Provider]:
@@ -41,24 +45,54 @@ def configured_providers() -> list[Provider]:
     return [by_name[x] for x in requested if x in by_name and by_name[x].key]
 
 
+def _score(p: Provider) -> float:
+    s = _state.get(p.name, {})
+    cooldown = max(0.0, s.get("cooldown_until", 0) - time.time())
+    if cooldown:
+        return 10000 + cooldown
+    return p.priority + s.get("failures", 0) * 4 + min(s.get("latency", 1.0), 20) * 0.15
+
+
+def _record(p: Provider, ok: bool, latency: float, status: int | None = None) -> None:
+    s = _state.setdefault(p.name, {})
+    if ok:
+        s["failures"] = max(0, s.get("failures", 0) - 1)
+        s["latency"] = latency
+        s["cooldown_until"] = 0
+        return
+    s["failures"] = s.get("failures", 0) + 1
+    if status == 429:
+        s["cooldown_until"] = time.time() + min(300, 15 * s["failures"])
+    elif status and status >= 500:
+        s["cooldown_until"] = time.time() + min(60, 5 * s["failures"])
+
+
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
+    providers = sorted(configured_providers(), key=_score)
+    if not providers:
+        raise RuntimeError("No AI providers are configured")
     last_error: Exception | None = None
+    last_response: httpx.Response | None = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
-        for provider in configured_providers():
+        for provider in providers:
+            started = time.monotonic()
             try:
                 payload: dict[str, Any] = json.loads(body)
                 payload["model"] = provider.model
-                response = await client.post(
-                    provider.url,
-                    headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"},
-                    json=payload,
-                )
+                response = await client.post(provider.url, headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=payload)
+                latency = time.monotonic() - started
+                last_response = response
                 if response.status_code < 400:
+                    _record(provider, True, latency, response.status_code)
                     return response, provider.name
                 if response.status_code not in (408, 409, 429, 500, 502, 503, 504):
                     return response, provider.name
+                _record(provider, False, latency, response.status_code)
             except (httpx.HTTPError, ValueError) as exc:
+                _record(provider, False, time.monotonic() - started)
                 last_error = exc
+    if last_response is not None:
+        return last_response, providers[-1].name
     if last_error:
         raise last_error
-    raise RuntimeError("No AI providers are configured")
+    raise RuntimeError("No AI providers are available")
