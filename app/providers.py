@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -30,11 +31,12 @@ PROVIDERS = [
     Provider("sambanova", "https://api.sambanova.ai/v1/chat/completions", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL", "Meta-Llama-3.3-70B-Instruct"),
     Provider("cerebras", "https://api.cerebras.ai/v1/chat/completions", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "gpt-oss-120b"),
     Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest"),
+    Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025"),
 ]
 
 
 def configured_providers() -> list[Provider]:
-    requested = [x.strip().lower() for x in os.getenv("XFI_AI_PROVIDERS", "groq,gemini,openrouter,mistral,sambanova,cerebras,huggingface").split(",") if x.strip()]
+    requested = [x.strip().lower() for x in os.getenv("XFI_AI_PROVIDERS", ",".join(p.name for p in PROVIDERS)).split(",") if x.strip()]
     by_name = {p.name: p for p in PROVIDERS}
     return [by_name[x] for x in requested if x in by_name and by_name[x].key]
 
@@ -44,8 +46,8 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
         for provider in configured_providers():
             try:
-                payload: dict[str, Any] = __import__("json").loads(body)
-                payload.setdefault("model", provider.model)
+                payload: dict[str, Any] = json.loads(body)
+                payload["model"] = provider.model
                 response = await client.post(
                     provider.url,
                     headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"},
