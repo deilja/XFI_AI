@@ -7,8 +7,8 @@ ENV_FILE="$ENV_DIR/xfi-ai.env"
 SERVICE="xfi-ai"
 DEFAULT_PORT=8091
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
 trap 'echo "[ERROR] Строка $LINENO: установка остановлена." >&2' ERR
+
 if [[ $EUID -ne 0 ]]; then echo "Запустите от root: sudo bash deploy/install.sh"; exit 1; fi
 say(){ printf '\n==> %s\n' "$*"; }
 fail(){ echo "[ERROR] $*" >&2; exit 1; }
@@ -36,16 +36,24 @@ PORT="${PORT:-$SUGGESTED_PORT}"
 port_free "$PORT" || fail "Порт $PORT уже занят."
 
 say "AI-провайдеры"
-echo "Добавьте ключи тех провайдеров, которые хотите использовать. Пустой ввод = отключено."
-read -rsp "Groq API key [Enter = пропустить]: " GROQ_KEY; echo
-read -rsp "Google Gemini API key [Enter = пропустить]: " GEMINI_KEY; echo
-read -rsp "OpenRouter API key [Enter = пропустить]: " OPENROUTER_KEY; echo
-[[ -n "$GROQ_KEY" || -n "$GEMINI_KEY" || -n "$OPENROUTER_KEY" ]] || fail "Нужен хотя бы один AI provider."
+echo "Пустой ключ = провайдер отключён. Можно включить несколько провайдеров для автоматического failover."
+read -rsp "Groq API key: " GROQ_KEY; echo
+read -rsp "Google Gemini API key: " GEMINI_KEY; echo
+read -rsp "OpenRouter API key: " OPENROUTER_KEY; echo
+read -rsp "Mistral API key: " MISTRAL_KEY; echo
+read -rsp "SambaNova API key: " SAMBANOVA_KEY; echo
+read -rsp "Cerebras API key: " CEREBRAS_KEY; echo
+read -rsp "Hugging Face token: " HF_KEY; echo
+[[ -n "$GROQ_KEY" || -n "$GEMINI_KEY" || -n "$OPENROUTER_KEY" || -n "$MISTRAL_KEY" || -n "$SAMBANOVA_KEY" || -n "$CEREBRAS_KEY" || -n "$HF_KEY" ]] || fail "Нужен хотя бы один AI provider."
 
 PROVIDERS=""
 [[ -n "$GROQ_KEY" ]] && PROVIDERS="groq"
 [[ -n "$GEMINI_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}gemini"
 [[ -n "$OPENROUTER_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}openrouter"
+[[ -n "$MISTRAL_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}mistral"
+[[ -n "$SAMBANOVA_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}sambanova"
+[[ -n "$CEREBRAS_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}cerebras"
+[[ -n "$HF_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}huggingface"
 echo "Порядок failover: $PROVIDERS"
 read -rp "Изменить порядок? [Enter = $PROVIDERS]: " CUSTOM_PROVIDERS
 PROVIDERS="${CUSTOM_PROVIDERS:-$PROVIDERS}"
@@ -78,16 +86,24 @@ cat > "$ENV_FILE" <<EOF
 GROQ_API_KEY=$GROQ_KEY
 GEMINI_API_KEY=$GEMINI_KEY
 OPENROUTER_API_KEY=$OPENROUTER_KEY
+MISTRAL_API_KEY=$MISTRAL_KEY
+SAMBANOVA_API_KEY=$SAMBANOVA_KEY
+CEREBRAS_API_KEY=$CEREBRAS_KEY
+HF_TOKEN=$HF_KEY
 XFI_AI_PROVIDERS=$PROVIDERS
 GROQ_MODEL=openai/gpt-oss-120b
 GEMINI_MODEL=gemini-2.5-flash
 OPENROUTER_MODEL=openrouter/free
+MISTRAL_MODEL=mistral-small-latest
+SAMBANOVA_MODEL=Meta-Llama-3.3-70B-Instruct
+CEREBRAS_MODEL=gpt-oss-120b
+HF_MODEL=openai/gpt-oss-120b:fastest
 XFI_AI_REFERER=https://$DOMAIN
 XFI_AI_ADMIN_KEY=$ADMIN_KEY
 XFI_AI_DB=/var/lib/xfi-ai/keys.db
 XFI_AI_KEY_PEPPER=$PEPPER
 EOF
-unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY
+unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY MISTRAL_KEY SAMBANOVA_KEY CEREBRAS_KEY HF_KEY
 chmod 600 "$ENV_FILE"
 chown root:xfi-ai "$ENV_FILE"
 
