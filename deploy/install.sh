@@ -9,7 +9,6 @@ DEFAULT_PORT=8091
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 trap 'echo "[ERROR] Строка $LINENO: установка остановлена." >&2' ERR
-
 if [[ $EUID -ne 0 ]]; then echo "Запустите от root: sudo bash deploy/install.sh"; exit 1; fi
 say(){ printf '\n==> %s\n' "$*"; }
 fail(){ echo "[ERROR] $*" >&2; exit 1; }
@@ -17,7 +16,7 @@ valid_domain(){ [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" != 
 port_free(){ ! ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])$1$"; }
 find_port(){ local p; for p in $(seq "$DEFAULT_PORT" 8199); do port_free "$p" && { echo "$p"; return; }; done; fail "Не найден свободный порт 8091-8199."; }
 
-say "XFI AI Gateway — установка"
+say "XFI AI Gateway — Multi-AI установка"
 [[ -r /etc/os-release ]] && . /etc/os-release || true
 [[ "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* ]] || echo "Предупреждение: скрипт рассчитан на Ubuntu/Debian."
 
@@ -36,8 +35,21 @@ PORT="${PORT:-$SUGGESTED_PORT}"
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1024 && "$PORT" -le 65535 ]] || fail "Порт должен быть 1024-65535."
 port_free "$PORT" || fail "Порт $PORT уже занят."
 
-read -rsp "GROQ_API_KEY: " GROQ_KEY; echo
-[[ "$GROQ_KEY" == gsk_* && ${#GROQ_KEY} -ge 20 ]] || fail "Ожидается Groq key формата gsk_..."
+say "AI-провайдеры"
+echo "Добавьте ключи тех провайдеров, которые хотите использовать. Пустой ввод = отключено."
+read -rsp "Groq API key [Enter = пропустить]: " GROQ_KEY; echo
+read -rsp "Google Gemini API key [Enter = пропустить]: " GEMINI_KEY; echo
+read -rsp "OpenRouter API key [Enter = пропустить]: " OPENROUTER_KEY; echo
+[[ -n "$GROQ_KEY" || -n "$GEMINI_KEY" || -n "$OPENROUTER_KEY" ]] || fail "Нужен хотя бы один AI provider."
+
+PROVIDERS=""
+[[ -n "$GROQ_KEY" ]] && PROVIDERS="groq"
+[[ -n "$GEMINI_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}gemini"
+[[ -n "$OPENROUTER_KEY" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}openrouter"
+echo "Порядок failover: $PROVIDERS"
+read -rp "Изменить порядок? [Enter = $PROVIDERS]: " CUSTOM_PROVIDERS
+PROVIDERS="${CUSTOM_PROVIDERS:-$PROVIDERS}"
+
 read -rsp "Админ-ключ [Enter = сгенерировать]: " ADMIN_KEY; echo
 ADMIN_KEY="${ADMIN_KEY:-$(openssl rand -hex 32)}"
 [[ ${#ADMIN_KEY} -ge 24 ]] || fail "Админ-ключ слишком короткий."
@@ -64,18 +76,25 @@ sudo -u xfi-ai python3 -m venv "$APP_DIR/venv"
 say "Секреты"
 cat > "$ENV_FILE" <<EOF
 GROQ_API_KEY=$GROQ_KEY
+GEMINI_API_KEY=$GEMINI_KEY
+OPENROUTER_API_KEY=$OPENROUTER_KEY
+XFI_AI_PROVIDERS=$PROVIDERS
+GROQ_MODEL=openai/gpt-oss-120b
+GEMINI_MODEL=gemini-2.5-flash
+OPENROUTER_MODEL=openrouter/free
+XFI_AI_REFERER=https://$DOMAIN
 XFI_AI_ADMIN_KEY=$ADMIN_KEY
 XFI_AI_DB=/var/lib/xfi-ai/keys.db
 XFI_AI_KEY_PEPPER=$PEPPER
 EOF
-unset GROQ_KEY
+unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY
 chmod 600 "$ENV_FILE"
 chown root:xfi-ai "$ENV_FILE"
 
 say "Systemd"
 cat > /etc/systemd/system/$SERVICE.service <<EOF
 [Unit]
-Description=XFI AI Gateway
+Description=XFI AI Gateway Multi-Provider
 After=network-online.target
 Wants=network-online.target
 [Service]
@@ -128,7 +147,7 @@ say "Проверка DNS"
 DOMAIN_IP="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"
 if [[ -n "$PUBLIC_IP" && "$DOMAIN_IP" != "$PUBLIC_IP" ]]; then
   echo "DNS пока не указывает на VPS: $DOMAIN -> ${DOMAIN_IP:-не найден}, VPS -> $PUBLIC_IP"
-  echo "После исправления DNS выполните: apt-get install -y certbot python3-certbot-nginx && certbot --nginx -d $DOMAIN --redirect"
+  echo "После исправления DNS: apt-get install -y certbot python3-certbot-nginx && certbot --nginx -d $DOMAIN --redirect"
 else
   say "HTTPS"
   apt-get install -y certbot python3-certbot-nginx
@@ -142,6 +161,7 @@ echo
 echo "Установка завершена."
 echo "Сайт: https://$DOMAIN/"
 echo "API:   https://$DOMAIN/v1/chat/completions"
-echo "Порт:  127.0.0.1:$PORT"
+echo "Провайдеры: $PROVIDERS"
+echo "Порт: 127.0.0.1:$PORT"
 echo "Админ-ключ: $ADMIN_KEY"
 echo "Секреты: $ENV_FILE"
