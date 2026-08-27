@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from .key_store import create_key, valid_key
+from .metrics import snapshot
 from .providers import complete, configured_providers
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
@@ -15,10 +16,13 @@ app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
 
 
 def require_proxy_key(authorization: str | None) -> None:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing API key")
-    if not valid_key(authorization[7:].strip()):
+    if not authorization or not authorization.startswith("Bearer ") or not valid_key(authorization[7:].strip()):
         raise HTTPException(401, "Invalid API key")
+
+
+def require_admin(key: str | None) -> None:
+    if not ADMIN_KEY or not key or not hmac.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(403, "Forbidden")
 
 
 @app.get("/health")
@@ -26,10 +30,15 @@ async def health():
     return {"status": "ok", "providers": [p.name for p in configured_providers()]}
 
 
+@app.get("/admin/providers")
+async def admin_providers(x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    return {"providers": snapshot()}
+
+
 @app.post("/api/keys")
 async def issue_key(request: Request, x_admin_key: str | None = Header(default=None)):
-    if not ADMIN_KEY or not x_admin_key or not hmac.compare_digest(x_admin_key, ADMIN_KEY):
-        raise HTTPException(403, "Forbidden")
+    require_admin(x_admin_key)
     body = await request.json()
     return {"api_key": create_key(str(body.get("name", "client"))), "warning": "Save this key now. It is not stored in plaintext."}
 
