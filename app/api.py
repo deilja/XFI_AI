@@ -16,6 +16,13 @@ ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
+OPENCLAW_ALLOWED = {
+    "status": ["openclaw", "gateway", "status"],
+    "models": ["openclaw", "models", "list"],
+    "pairing": ["openclaw", "pairing", "list", "telegram"],
+    "cron": ["openclaw", "cron", "list"],
+    "heartbeat": ["openclaw", "system", "heartbeat", "last"],
+}
 
 
 def require_proxy_key(authorization: str | None) -> str:
@@ -79,7 +86,7 @@ async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | Non
 @app.get("/admin/providers")
 async def admin_providers(x_admin_key: str | None = Header(default=None)):
     require_admin(x_admin_key)
-    return {"providers": snapshot()}
+    return {"providers": snapshot(), "configured": [p.name for p in configured_providers()]}
 
 
 @app.post("/admin/providers/test")
@@ -101,6 +108,16 @@ async def admin_provider_detect(request: Request, x_admin_key: str | None = Head
     if not key:
         raise HTTPException(400, "key is required")
     return {"results": await detect_provider_key(key)}
+
+
+@app.get("/admin/openclaw")
+async def admin_openclaw(x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    result = {}
+    for name, args in OPENCLAW_ALLOWED.items():
+        rc, out = run_command(args, timeout=12)
+        result[name] = {"ok": rc == 0, "output": out}
+    return result
 
 
 @app.get("/admin/system")
