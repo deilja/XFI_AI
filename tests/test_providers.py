@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-import app.providers as providers
+from app import providers
 
 
 @pytest.mark.asyncio
@@ -20,8 +20,10 @@ async def test_complete_reports_actual_last_provider(monkeypatch):
     class FakeClient:
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, *args):
             return False
+
         async def post(self, *args, **kwargs):
             return responses.pop(0)
 
@@ -40,8 +42,10 @@ async def test_complete_rejects_invalid_json_before_provider_call(monkeypatch):
     class FakeClient:
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, *args):
             return False
+
         async def post(self, *args, **kwargs):
             nonlocal called
             called = True
