@@ -1,4 +1,7 @@
+import pytest
+
 from app.api import ALLOWED_SERVICES, OPENCLAW_ALLOWED, require_admin, require_proxy_key
+from app.vps_manager import _HOST_RE, _ssh_base, add_vps, safe_restart
 
 
 def test_proxy_key_rejects_empty_or_oversized_credentials():
@@ -33,3 +36,30 @@ def test_openclaw_commands_are_fixed_argument_lists():
         assert command[0] == "openclaw"
         assert all(isinstance(part, str) and part for part in command)
         assert not any(";" in part or "&&" in part or "|" in part for part in command)
+
+
+def test_vps_host_validation_rejects_shell_metacharacters():
+    for host in ("example.com;id", "host && id", "host|id", "host$(id)", "../host"):
+        assert _HOST_RE.fullmatch(host) is None
+
+
+def test_vps_rejects_unsupported_auth_and_invalid_port():
+    with pytest.raises(ValueError, match="auth_type"):
+        add_vps("test", "127.0.0.1", auth_type="password", auth_value="secret")
+    with pytest.raises(ValueError, match="port"):
+        add_vps("test", "127.0.0.1", port=0, auth_type="agent")
+    with pytest.raises(ValueError, match="port"):
+        add_vps("test", "127.0.0.1", port=65536, auth_type="agent")
+
+
+def test_ssh_base_never_embeds_a_remote_command():
+    row = (1, "test", "127.0.0.1", 22, "root", "agent", "")
+    args = _ssh_base(row)
+    assert args[-1] == "root@127.0.0.1"
+    assert "systemctl" not in args
+    assert "bash" not in args
+
+
+def test_safe_restart_rejects_command_injection_service():
+    with pytest.raises(ValueError, match="not allowed"):
+        safe_restart(1, "xray;id")
