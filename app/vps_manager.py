@@ -135,7 +135,7 @@ def detect(vps_id: int):
             conn.commit()
         _audit("detect", row[2], "ok" if ok else out[-1000:])
         return {"ok": ok, "raw": out}
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         with _db() as conn:
             conn.execute("UPDATE vps SET last_check=?,last_ok=0,last_error=? WHERE id=?", (time.time(), str(exc)[:1000], vps_id))
             conn.commit()
