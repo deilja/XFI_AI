@@ -1,5 +1,4 @@
 import hashlib
-import hmac
 import os
 import secrets
 import sqlite3
