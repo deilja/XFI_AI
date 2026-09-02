@@ -1,8 +1,4 @@
-import base64
-import hashlib
-import hmac
 import os
-import secrets
 import shlex
 import sqlite3
 import subprocess
@@ -10,64 +6,71 @@ import time
 from pathlib import Path
 
 DB_PATH = Path(os.getenv("XFI_AI_DB", "/var/lib/xfi-ai/keys.db"))
-SECRET = os.getenv("XFI_AI_VPS_SECRET") or os.getenv("XFI_AI_KEY_PEPPER") or ""
+ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
+AUTH_TYPES = {"key", "agent"}
 
 
 def _db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS vps (
-        id INTEGER PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL UNIQUE,
-        port INTEGER NOT NULL DEFAULT 22, username TEXT NOT NULL DEFAULT 'root',
-        auth_type TEXT NOT NULL DEFAULT 'key', auth_value TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        last_check REAL, last_ok INTEGER DEFAULT 0, last_error TEXT
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL UNIQUE,
+        port INTEGER NOT NULL DEFAULT 22,
+        username TEXT NOT NULL DEFAULT 'root',
+        auth_type TEXT NOT NULL DEFAULT 'key',
+        auth_value TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        last_check REAL,
+        last_ok INTEGER DEFAULT 0,
+        last_error TEXT
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        action TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL
+        id INTEGER PRIMARY KEY,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        result TEXT NOT NULL
     )""")
     conn.commit()
     return conn
 
 
-def _crypt(value: str) -> str:
-    if not value or not SECRET:
-        return ""
-    key = hashlib.sha256(SECRET.encode()).digest()
-    raw = value.encode()
-    out = bytes(b ^ key[i % len(key)] for i, b in enumerate(raw))
-    return base64.urlsafe_b64encode(out).decode()
+def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_type: str = "key", auth_value: str = ""):
+    """Register a VPS. SSH passwords are deliberately unsupported.
 
-
-def _decrypt(value: str) -> str:
-    if not value or not SECRET:
-        return ""
-    try:
-        key = hashlib.sha256(SECRET.encode()).digest()
-        raw = base64.urlsafe_b64decode(value.encode())
-        return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw)).decode()
-    except Exception:
-        return ""
-
-
-def add_vps(name: str, host: str, port: int, username: str, auth_type: str, auth_value: str = ""):
-    if auth_type not in {"key", "password", "agent"}:
-        raise ValueError("auth_type must be key, password or agent")
-    if not (1 <= port <= 65535):
+    auth_type=key stores only a filesystem path to an existing private key.
+    auth_type=agent uses the caller's SSH agent and stores no credential.
+    """
+    if auth_type not in AUTH_TYPES:
+        raise ValueError("auth_type must be key or agent; password authentication is disabled")
+    if not (1 <= int(port) <= 65535):
         raise ValueError("invalid SSH port")
-    if auth_type == "password" and not SECRET:
-        raise ValueError("XFI_AI_VPS_SECRET is required for password authentication")
-    stored = _crypt(auth_value) if auth_type == "password" else auth_value[:500]
+    if auth_type == "key":
+        key_path = Path(auth_value).expanduser()
+        if not key_path.is_absolute():
+            raise ValueError("SSH key path must be absolute")
+        if len(str(key_path)) > 500:
+            raise ValueError("SSH key path is too long")
+        stored = str(key_path)
+    else:
+        stored = ""
     with _db() as conn:
-        cur = conn.execute("INSERT INTO vps(name,host,port,username,auth_type,auth_value) VALUES(?,?,?,?,?,?)", (name[:100], host[:255], port, username[:100], auth_type, stored))
+        cur = conn.execute(
+            "INSERT INTO vps(name,host,port,username,auth_type,auth_value) VALUES(?,?,?,?,?,?)",
+            (name[:100], host[:255], int(port), username[:100], auth_type, stored),
+        )
         vid = cur.lastrowid
     return vid
 
 
 def list_vps():
     with _db() as conn:
-        rows = conn.execute("SELECT id,name,host,port,username,auth_type,created_at,last_check,last_ok,last_error FROM vps ORDER BY id DESC").fetchall()
-    fields = ("id","name","host","port","username","auth_type","created_at","last_check","last_ok","last_error")
+        rows = conn.execute(
+            "SELECT id,name,host,port,username,auth_type,created_at,last_check,last_ok,last_error FROM vps ORDER BY id DESC"
+        ).fetchall()
+    fields = ("id", "name", "host", "port", "username", "auth_type", "created_at", "last_check", "last_ok", "last_error")
     return [dict(zip(fields, row)) for row in rows]
 
 
@@ -77,66 +80,109 @@ def delete_vps(vps_id: int):
         conn.commit()
 
 
+def _get_vps(vps_id: int):
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id,name,host,port,username,auth_type,auth_value FROM vps WHERE id=?", (vps_id,)
+        ).fetchone()
+    if not row:
+        raise KeyError("VPS not found")
+    return row
+
+
 def _ssh_base(row):
-    host, port, username, auth_type, auth_value = row[2], row[3], row[4], row[5], row[6]
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-p", str(port)]
-    if auth_type == "key" and auth_value:
-        args += ["-i", auth_value]
+    _, _, host, port, username, auth_type, auth_value = row
+    args = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-p", str(port),
+    ]
+    if auth_type == "key":
+        if not auth_value:
+            raise ValueError("SSH key path is missing")
+        key = Path(auth_value).expanduser()
+        if not key.is_absolute():
+            raise ValueError("SSH key path must be absolute")
+        if not key.is_file():
+            raise FileNotFoundError(f"SSH key not found: {key}")
+        args += ["-i", str(key)]
+    elif auth_type != "agent":
+        raise ValueError("unsupported SSH authentication type")
     args.append(f"{username}@{host}")
-    return args, auth_type, _decrypt(auth_value)
+    return args
 
 
 def _run_ssh(row, remote: str):
-    args, auth_type, password = _ssh_base(row)
-    if auth_type == "password":
-        raise RuntimeError("Password SSH is stored for metadata but execution requires an SSH agent/key; use auth_type=key or agent")
-    p = subprocess.run(args + ["--", remote], capture_output=True, text=True, timeout=15, check=False)
-    return p.returncode, (p.stdout + p.stderr).strip()[-8000:]
+    args = _ssh_base(row)
+    if len(remote) > 12000:
+        raise ValueError("remote command is too long")
+    proc = subprocess.run(
+        args + ["--", remote],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        env=os.environ.copy(),
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()[-8000:]
 
 
 def _audit(action: str, target: str, result: str):
     with _db() as conn:
-        conn.execute("INSERT INTO audit_log(action,target,result) VALUES(?,?,?)", (action, target[:255], result[:2000]))
+        conn.execute(
+            "INSERT INTO audit_log(action,target,result) VALUES(?,?,?)",
+            (action[:100], target[:255], result[:2000]),
+        )
         conn.commit()
 
 
 def audit(limit: int = 100):
     with _db() as conn:
-        rows = conn.execute("SELECT id,created_at,action,target,result FROM audit_log ORDER BY id DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
-    return [dict(zip(("id","created_at","action","target","result"), row)) for row in rows]
+        rows = conn.execute(
+            "SELECT id,created_at,action,target,result FROM audit_log ORDER BY id DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    return [dict(zip(("id", "created_at", "action", "target", "result"), row)) for row in rows]
 
 
 def detect(vps_id: int):
-    with _db() as conn:
-        row = conn.execute("SELECT id,name,host,port,username,auth_type,auth_value FROM vps WHERE id=?", (vps_id,)).fetchone()
-    if not row:
-        raise KeyError("VPS not found")
-    probe = r'''printf '__XFI__\n'; printf 'hostname='; hostname 2>/dev/null; printf '\nos='; . /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME"; printf '\n'; printf 'xui='; systemctl list-unit-files 2>/dev/null | grep -E '^(x-ui|3x-ui)\.service' | tr '\n' ','; printf '\nxray='; systemctl list-unit-files 2>/dev/null | grep '^xray\.service' | tr '\n' ','; printf '\nnginx='; systemctl list-unit-files 2>/dev/null | grep '^nginx\.service' | tr '\n' ','; printf '\ndocker='; command -v docker >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nyadrenovpn='; pgrep -af 'YadrenoVPN|yadrenovpn' 2>/dev/null | head -3 | tr '\n' ';'; printf '\nopenclaw='; command -v openclaw >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nopenclaw_gateway='; systemctl --user is-active openclaw-gateway 2>/dev/null || true; printf '\n'''
+    row = _get_vps(vps_id)
+    probe = r'''printf '__XFI__\n'; printf 'hostname='; hostname 2>/dev/null; printf '\nos='; . /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME"; printf '\n'; printf 'xui='; systemctl list-unit-files 2>/dev/null | grep -E '^(x-ui|3x-ui)\.service' | tr '\n' ','; printf '\nxray='; systemctl list-unit-files 2>/dev/null | grep '^xray\.service' | tr '\n' ','; printf '\nnginx='; systemctl list-unit-files 2>/dev/null | grep '^nginx\.service' | tr '\n' ','; printf '\ndocker='; command -v docker >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nyadrenovpn='; pgrep -af 'YadrenoVPN|yadrenovpn' 2>/dev/null | head -3 | tr '\n' ';'; printf '\nopenclaw='; command -v openclaw >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nopenclaw_gateway='; systemctl --user is-active openclaw-gateway 2>/dev/null || true; printf '\n''' 
     try:
         rc, out = _run_ssh(row, probe)
         ok = rc == 0 and "__XFI__" in out
         with _db() as conn:
-            conn.execute("UPDATE vps SET last_check=?,last_ok=?,last_error=? WHERE id=?", (time.time(), int(ok), "" if ok else out[-1000:], vps_id))
+            conn.execute(
+                "UPDATE vps SET last_check=?,last_ok=?,last_error=? WHERE id=?",
+                (time.time(), int(ok), "" if ok else out[-1000:], vps_id),
+            )
             conn.commit()
         _audit("detect", row[2], "ok" if ok else out[-1000:])
         return {"ok": ok, "raw": out}
     except Exception as exc:
         with _db() as conn:
-            conn.execute("UPDATE vps SET last_check=?,last_ok=0,last_error=? WHERE id=?", (time.time(), str(exc)[:1000], vps_id))
+            conn.execute(
+                "UPDATE vps SET last_check=?,last_ok=0,last_error=? WHERE id=?",
+                (time.time(), str(exc)[:1000], vps_id),
+            )
             conn.commit()
         _audit("detect", row[2], str(exc))
         return {"ok": False, "error": str(exc)}
 
 
 def safe_restart(vps_id: int, service: str):
-    allowed = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
-    if service not in allowed:
+    if service not in ALLOWED_SERVICES:
         raise ValueError("Service is not allowed")
-    with _db() as conn:
-        row = conn.execute("SELECT id,name,host,port,username,auth_type,auth_value FROM vps WHERE id=?", (vps_id,)).fetchone()
-    if not row:
-        raise KeyError("VPS not found")
-    remote = f"systemctl is-active --quiet {shlex.quote(service)} && systemctl restart {shlex.quote(service)} && systemctl is-active {shlex.quote(service)} || systemctl is-active {shlex.quote(service)}"
+    row = _get_vps(vps_id)
+    # Fixed allowlist means the AI/UI cannot inject an arbitrary systemctl target.
+    remote = (
+        f"systemctl is-active --quiet {shlex.quote(service)} "
+        f"&& systemctl restart {shlex.quote(service)} "
+        f"&& systemctl is-active {shlex.quote(service)} "
+        f"|| systemctl is-active {shlex.quote(service)}"
+    )
     rc, out = _run_ssh(row, remote)
     ok = rc == 0 and out.splitlines()[-1:] == ["active"]
     _audit("restart", f"{row[2]}:{service}", "ok" if ok else out[-1000:])
