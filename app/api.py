@@ -24,7 +24,12 @@ from .key_store import (
     valid_key,
 )
 from .metrics import snapshot
-from .providers import complete, configured_providers, detect_provider_key, test_provider_key
+from .providers import (
+    complete,
+    configured_providers,
+    detect_provider_key,
+    test_provider_key,
+)
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
