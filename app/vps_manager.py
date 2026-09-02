@@ -106,9 +106,9 @@ def _ssh_base(row):
 
 def _run_ssh(row, remote: str):
     args = _ssh_base(row)
-    if len(remote) > 12000:
-        raise ValueError("remote command is too long")
-    proc = subprocess.run(args + ["--", remote], capture_output=True, text=True, timeout=20, check=False, env=os.environ.copy())
+    if not remote or len(remote) > 12000:
+        raise ValueError("remote command is empty or too long")
+    proc = subprocess.run(args + [remote], capture_output=True, text=True, timeout=20, check=False, env=os.environ.copy())
     return proc.returncode, (proc.stdout + proc.stderr).strip()[-8000:]
 
 
@@ -147,7 +147,7 @@ def safe_restart(vps_id: int, service: str):
     if service not in ALLOWED_SERVICES:
         raise ValueError("Service is not allowed")
     row = _get_vps(vps_id)
-    remote = f"systemctl is-active --quiet {service} || exit 4; systemctl restart {service} || exit 5; systemctl is-active {service}"
+    remote = f"systemctl cat {service} >/dev/null 2>&1 || exit 3; systemctl restart {service} || exit 5; systemctl is-active {service}"
     rc, out = _run_ssh(row, remote)
     ok = rc == 0 and out.splitlines()[-1:] == ["active"]
     _audit("restart", f"{row[2]}:{service}", "ok" if ok else out[-1000:])
