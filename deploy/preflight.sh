@@ -35,12 +35,7 @@ then ok "Python >= 3.11"; else bad "Требуется Python >= 3.11"; fi
 [[ -f "$APP_ROOT/app/providers.py" ]] && ok "app/providers.py найден" || bad "Не найден app/providers.py"
 [[ -f "$APP_ROOT/requirements.txt" ]] && ok "requirements.txt найден" || bad "Не найден requirements.txt"
 [[ -f "$APP_ROOT/deploy/install.sh" ]] && ok "deploy/install.sh найден" || bad "Не найден deploy/install.sh"
-
-if [[ -f "$APP_ROOT/pyproject.toml" ]]; then
-  ok "pyproject.toml найден"
-else
-  bad "Не найден pyproject.toml"
-fi
+[[ -f "$APP_ROOT/pyproject.toml" ]] && ok "pyproject.toml найден" || bad "Не найден pyproject.toml"
 
 if python3 -m compileall -q "$APP_ROOT/app"; then
   ok "Python syntax check"
@@ -85,7 +80,7 @@ fi
 
 printf '\n'
 if (( FAIL )); then
-  echo "PRELIGHT: FAILED"
+  echo "PREFLIGHT: FAILED"
   exit 2
 fi
 
