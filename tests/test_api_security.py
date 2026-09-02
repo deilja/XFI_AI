@@ -1,4 +1,5 @@
 import pytest
+from fastapi.testclient import TestClient
 
 from app.api import ALLOWED_SERVICES, OPENCLAW_ALLOWED, require_admin, require_proxy_key
 from app.vps_manager import _HOST_RE, _ssh_base, add_vps, safe_restart
@@ -63,3 +64,33 @@ def test_ssh_base_never_embeds_a_remote_command():
 def test_safe_restart_rejects_command_injection_service():
     with pytest.raises(ValueError, match="not allowed"):
         safe_restart(1, "xray;id")
+
+
+def test_api_security_headers_and_json_validation(monkeypatch):
+    monkeypatch.setattr("app.api.ADMIN_KEY", "test-admin-key")
+    client = TestClient(__import__("app.api", fromlist=["app"]).app)
+
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+
+    response = client.post(
+        "/admin/providers/detect",
+        headers={"X-Admin-Key": "test-admin-key", "Content-Type": "application/json"},
+        content=b"{invalid",
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid JSON"
+
+    response = client.post(
+        "/admin/providers/detect",
+        headers={"X-Admin-Key": "test-admin-key", "Content-Type": "application/json"},
+        json=["not", "an", "object"],
+    )
+    assert response.status_code == 400
+
+    response = client.get("/admin/providers")
+    assert response.status_code == 403
