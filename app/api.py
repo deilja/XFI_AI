@@ -1,7 +1,11 @@
+import base64
+import hashlib
 import hmac
 import json
 import os
+import secrets
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
@@ -15,6 +19,7 @@ from .providers import complete, configured_providers, detect_provider_key, test
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
+ADMIN_SESSION_TTL = 15 * 60
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
@@ -43,6 +48,35 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+def _session_token(timestamp: int, nonce: str) -> str:
+    payload = f"{timestamp}.{nonce}".encode()
+    signature = hmac.new(ADMIN_KEY.encode(), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(payload + b"." + signature).decode().rstrip("=")
+
+
+def _valid_session(token: str | None) -> bool:
+    if not ADMIN_KEY or not token or len(token) > 512:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        timestamp_b, nonce_b, signature = raw.split(b".", 2)
+        timestamp = int(timestamp_b)
+        if abs(time.time() - timestamp) > ADMIN_SESSION_TTL:
+            return False
+        payload = timestamp_b + b"." + nonce_b
+        expected = hmac.new(ADMIN_KEY.encode(), payload, hashlib.sha256).digest()
+        return hmac.compare_digest(signature, expected)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return False
+
+
+def require_admin(key: str | None, session: str | None = None) -> None:
+    if _valid_session(session):
+        return
+    if not ADMIN_KEY or not key or len(key) != len(ADMIN_KEY) or not hmac.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(403, "Forbidden")
+
+
 def require_proxy_key(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing API key")
@@ -52,11 +86,6 @@ def require_proxy_key(authorization: str | None) -> str:
     if not consume(raw):
         raise HTTPException(429, "API key rate limit exceeded")
     return raw
-
-
-def require_admin(key: str | None) -> None:
-    if not ADMIN_KEY or not key or len(key) != len(ADMIN_KEY) or not hmac.compare_digest(key, ADMIN_KEY):
-        raise HTTPException(403, "Forbidden")
 
 
 def run_command(args: list[str], timeout: int = 8) -> tuple[int, str]:
@@ -85,30 +114,51 @@ async def health():
     return {"status": "ok", "providers": [p.name for p in configured_providers()]}
 
 
+@app.post("/admin/session")
+async def admin_session(request: Request):
+    body = await read_json(request, max_bytes=4096)
+    key = str(body.get("key", ""))
+    if not ADMIN_KEY or not key or len(key) != len(ADMIN_KEY) or not hmac.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(403, "Forbidden")
+    now = int(time.time())
+    token = _session_token(now, secrets.token_urlsafe(24))
+    response = JSONResponse({"ok": True, "expires_in": ADMIN_SESSION_TTL})
+    response.set_cookie("xfi_admin_session", token, max_age=ADMIN_SESSION_TTL, httponly=True, secure=True, samesite="strict", path="/")
+    response.headers["X-XFI-Admin-Session"] = token
+    return response
+
+
+@app.post("/admin/session/logout")
+async def admin_session_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("xfi_admin_session", path="/")
+    return response
+
+
 @app.get("/admin/keys")
-async def admin_keys(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_keys(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     return {"keys": list_keys()}
 
 
 @app.post("/admin/keys/{key_id}/active")
-async def admin_key_active(key_id: int, request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_key_active(key_id: int, request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     set_active(key_id, bool(body.get("active", True)))
     return {"ok": True}
 
 
 @app.delete("/admin/keys/{key_id}")
-async def admin_key_delete(key_id: int, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_key_delete(key_id: int, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     delete_key(key_id)
     return {"ok": True}
 
 
 @app.post("/admin/keys/{key_id}/limits")
-async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     try:
         rpm, daily = int(body.get("rpm", 60)), int(body.get("daily", 5000))
@@ -121,14 +171,14 @@ async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | Non
 
 
 @app.get("/admin/providers")
-async def admin_providers(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_providers(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     return {"providers": snapshot(), "configured": [p.name for p in configured_providers()]}
 
 
 @app.post("/admin/providers/test")
-async def admin_provider_test(request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_provider_test(request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     key = str(body.get("key", ""))
     provider = str(body.get("provider", ""))
@@ -138,8 +188,8 @@ async def admin_provider_test(request: Request, x_admin_key: str | None = Header
 
 
 @app.post("/admin/providers/detect")
-async def admin_provider_detect(request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_provider_detect(request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     key = str(body.get("key", ""))
     if not key or len(key) > 1000:
@@ -148,8 +198,8 @@ async def admin_provider_detect(request: Request, x_admin_key: str | None = Head
 
 
 @app.get("/admin/openclaw")
-async def admin_openclaw(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_openclaw(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     result = {}
     for name, args in OPENCLAW_ALLOWED.items():
         rc, out = run_command(args, timeout=12)
@@ -158,8 +208,8 @@ async def admin_openclaw(x_admin_key: str | None = Header(default=None)):
 
 
 @app.get("/admin/system")
-async def admin_system(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_system(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     services = []
     for name in sorted(ALLOWED_SERVICES):
         rc, out = run_command(["systemctl", "is-active", name])
@@ -169,8 +219,8 @@ async def admin_system(x_admin_key: str | None = Header(default=None)):
 
 
 @app.post("/admin/system/{service}/restart")
-async def admin_restart(service: str, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_restart(service: str, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     if service not in ALLOWED_SERVICES:
         raise HTTPException(400, "Service is not allowed")
     rc, _ = run_command(["systemctl", "restart", service], timeout=15)
@@ -181,14 +231,14 @@ async def admin_restart(service: str, x_admin_key: str | None = Header(default=N
 
 
 @app.get("/admin/vps")
-async def admin_vps(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_vps(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     return {"vps": list_vps()}
 
 
 @app.post("/admin/vps")
-async def admin_vps_add(request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_vps_add(request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     try:
         vid = add_vps(str(body.get("name", body.get("host", "VPS"))), str(body["host"]), int(body.get("port", 22)), str(body.get("username", "root")), str(body.get("auth_type", "key")), str(body.get("auth_value", "")))
@@ -198,15 +248,15 @@ async def admin_vps_add(request: Request, x_admin_key: str | None = Header(defau
 
 
 @app.delete("/admin/vps/{vps_id}")
-async def admin_vps_delete(vps_id: int, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_vps_delete(vps_id: int, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     delete_vps(vps_id)
     return {"ok": True}
 
 
 @app.post("/admin/vps/{vps_id}/detect")
-async def admin_vps_detect(vps_id: int, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_vps_detect(vps_id: int, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     try:
         return detect(vps_id)
     except KeyError as exc:
@@ -214,8 +264,8 @@ async def admin_vps_detect(vps_id: int, x_admin_key: str | None = Header(default
 
 
 @app.post("/admin/vps/{vps_id}/restart/{service}")
-async def admin_vps_restart(vps_id: int, service: str, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_vps_restart(vps_id: int, service: str, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     try:
         return safe_restart(vps_id, service)
     except KeyError as exc:
@@ -225,14 +275,14 @@ async def admin_vps_restart(vps_id: int, service: str, x_admin_key: str | None =
 
 
 @app.get("/admin/audit")
-async def admin_audit(x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def admin_audit(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     return {"audit": audit()}
 
 
 @app.post("/api/keys")
-async def issue_key(request: Request, x_admin_key: str | None = Header(default=None)):
-    require_admin(x_admin_key)
+async def issue_key(request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
     try:
         rpm, daily = int(body.get("rpm", 60)), int(body.get("daily", 5000))
