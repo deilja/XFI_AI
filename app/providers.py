@@ -81,6 +81,58 @@ def _url(p: Provider) -> str:
     return p.url
 
 
+def _key_fingerprint(key: str) -> str:
+    # Never return or log the secret. This is only a UI-safe identifier.
+    import hashlib
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
+    """Test one supplied API key without storing it.
+
+    The request is a minimal chat completion. The response contains only
+    provider/status/latency/model/fingerprint and never the supplied secret.
+    """
+    provider = next((p for p in PROVIDERS if p.name == provider_name.lower()), None)
+    if not provider:
+        return {"ok": False, "provider": provider_name, "error": "Unknown provider"}
+    if not key or len(key) > 1000:
+        return {"ok": False, "provider": provider.name, "error": "Invalid key input"}
+    if provider.name == "cloudflare" and not os.getenv("CLOUDFLARE_ACCOUNT_ID"):
+        return {"ok": False, "provider": provider.name, "error": "CLOUDFLARE_ACCOUNT_ID is required"}
+    payload = {"model": provider.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            response = await client.post(
+                _url(provider),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        latency_ms = round((time.monotonic() - started) * 1000, 1)
+        ok = response.status_code < 400
+        if ok:
+            return {"ok": True, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
+        return {"ok": False, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key), "error": "Provider rejected the key or request"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "provider": provider.name, "model": provider.model, "latency_ms": round((time.monotonic() - started) * 1000, 1), "fingerprint": _key_fingerprint(key), "error": type(exc).__name__}
+
+
+async def detect_provider_key(key: str) -> list[dict[str, Any]]:
+    """Try the same key against every configured provider endpoint.
+
+    No key is persisted. Results are intentionally metadata-only.
+    """
+    if not key or len(key) > 1000:
+        return []
+    results: list[dict[str, Any]] = []
+    for provider in PROVIDERS:
+        result = await test_provider_key(provider.name, key)
+        if result.get("ok") or result.get("status") in (401, 403, 429):
+            results.append(result)
+    return results
+
+
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
     providers = sorted(configured_providers(), key=_score)
     if not providers:
