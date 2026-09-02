@@ -7,14 +7,14 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .key_store import create_key, delete_key, key_info, list_keys, set_active, update_limits, valid_key, consume
+from .key_store import create_key, delete_key, list_keys, set_active, update_limits, valid_key, consume
 from .metrics import snapshot
 from .providers import complete, configured_providers
+from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
-
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 
 
@@ -103,6 +103,56 @@ async def admin_restart(service: str, x_admin_key: str | None = Header(default=N
         raise HTTPException(502, f"Restart failed: {out[-1000:]}")
     rc2, state = run_command(["systemctl", "is-active", service])
     return {"ok": rc2 == 0, "service": service, "status": state}
+
+
+@app.get("/admin/vps")
+async def admin_vps(x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    return {"vps": list_vps()}
+
+
+@app.post("/admin/vps")
+async def admin_vps_add(request: Request, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    body = await request.json()
+    try:
+        vid = add_vps(str(body.get("name", body.get("host", "VPS"))), str(body["host"]), int(body.get("port", 22)), str(body.get("username", "root")), str(body.get("auth_type", "key")), str(body.get("auth_value", "")))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "id": vid}
+
+
+@app.delete("/admin/vps/{vps_id}")
+async def admin_vps_delete(vps_id: int, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    delete_vps(vps_id)
+    return {"ok": True}
+
+
+@app.post("/admin/vps/{vps_id}/detect")
+async def admin_vps_detect(vps_id: int, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    try:
+        return detect(vps_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/admin/vps/{vps_id}/restart/{service}")
+async def admin_vps_restart(vps_id: int, service: str, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    try:
+        return safe_restart(vps_id, service)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/admin/audit")
+async def admin_audit(x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    return {"audit": audit()}
 
 
 @app.post("/api/keys")
