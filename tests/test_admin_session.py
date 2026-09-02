@@ -3,14 +3,13 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from app import api, key_store, metrics
+
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("XFI_AI_ADMIN_KEY", "test-admin-key")
     monkeypatch.setenv("XFI_AI_DB", str(tmp_path / "keys.db"))
-    import app.api as api
-    import app.key_store as key_store
-    import app.metrics as metrics
     api.ADMIN_KEY = "test-admin-key"
     key_store.DB = tmp_path / "keys.db"
     metrics.DB = tmp_path / "keys.db"
