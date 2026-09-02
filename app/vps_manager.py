@@ -1,5 +1,5 @@
 import os
-import shlex
+import re
 import sqlite3
 import subprocess
 import time
@@ -8,6 +8,7 @@ from pathlib import Path
 DB_PATH = Path(os.getenv("XFI_AI_DB", "/var/lib/xfi-ai/keys.db"))
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 AUTH_TYPES = {"key", "agent"}
+_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$")
 
 
 def _db():
@@ -38,13 +39,14 @@ def _db():
 
 
 def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_type: str = "key", auth_value: str = ""):
-    """Register a VPS. SSH passwords are deliberately unsupported.
-
-    auth_type=key stores only a filesystem path to an existing private key.
-    auth_type=agent uses the caller's SSH agent and stores no credential.
-    """
     if auth_type not in AUTH_TYPES:
         raise ValueError("auth_type must be key or agent; password authentication is disabled")
+    host = host.strip()
+    username = username.strip()
+    if not host or not _HOST_RE.fullmatch(host):
+        raise ValueError("invalid VPS host")
+    if not username or len(username) > 100 or any(c.isspace() for c in username) or username.startswith("-"):
+        raise ValueError("invalid SSH username")
     if not (1 <= int(port) <= 65535):
         raise ValueError("invalid SSH port")
     if auth_type == "key":
@@ -59,7 +61,7 @@ def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_t
     with _db() as conn:
         cur = conn.execute(
             "INSERT INTO vps(name,host,port,username,auth_type,auth_value) VALUES(?,?,?,?,?,?)",
-            (name[:100], host[:255], int(port), username[:100], auth_type, stored),
+            (name[:100], host, int(port), username, auth_type, stored),
         )
         vid = cur.lastrowid
     return vid
@@ -67,9 +69,7 @@ def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_t
 
 def list_vps():
     with _db() as conn:
-        rows = conn.execute(
-            "SELECT id,name,host,port,username,auth_type,created_at,last_check,last_ok,last_error FROM vps ORDER BY id DESC"
-        ).fetchall()
+        rows = conn.execute("SELECT id,name,host,port,username,auth_type,created_at,last_check,last_ok,last_error FROM vps ORDER BY id DESC").fetchall()
     fields = ("id", "name", "host", "port", "username", "auth_type", "created_at", "last_check", "last_ok", "last_error")
     return [dict(zip(fields, row)) for row in rows]
 
@@ -82,9 +82,7 @@ def delete_vps(vps_id: int):
 
 def _get_vps(vps_id: int):
     with _db() as conn:
-        row = conn.execute(
-            "SELECT id,name,host,port,username,auth_type,auth_value FROM vps WHERE id=?", (vps_id,)
-        ).fetchone()
+        row = conn.execute("SELECT id,name,host,port,username,auth_type,auth_value FROM vps WHERE id=?", (vps_id,)).fetchone()
     if not row:
         raise KeyError("VPS not found")
     return row
@@ -92,20 +90,12 @@ def _get_vps(vps_id: int):
 
 def _ssh_base(row):
     _, _, host, port, username, auth_type, auth_value = row
-    args = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=8",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-p", str(port),
-    ]
+    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-p", str(port)]
     if auth_type == "key":
         if not auth_value:
             raise ValueError("SSH key path is missing")
         key = Path(auth_value).expanduser()
-        if not key.is_absolute():
-            raise ValueError("SSH key path must be absolute")
-        if not key.is_file():
+        if not key.is_absolute() or not key.is_file():
             raise FileNotFoundError(f"SSH key not found: {key}")
         args += ["-i", str(key)]
     elif auth_type != "agent":
@@ -118,55 +108,36 @@ def _run_ssh(row, remote: str):
     args = _ssh_base(row)
     if len(remote) > 12000:
         raise ValueError("remote command is too long")
-    proc = subprocess.run(
-        args + ["--", remote],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-        env=os.environ.copy(),
-    )
+    proc = subprocess.run(args + ["--", remote], capture_output=True, text=True, timeout=20, check=False, env=os.environ.copy())
     return proc.returncode, (proc.stdout + proc.stderr).strip()[-8000:]
 
 
 def _audit(action: str, target: str, result: str):
     with _db() as conn:
-        conn.execute(
-            "INSERT INTO audit_log(action,target,result) VALUES(?,?,?)",
-            (action[:100], target[:255], result[:2000]),
-        )
+        conn.execute("INSERT INTO audit_log(action,target,result) VALUES(?,?,?)", (action[:100], target[:255], result[:2000]))
         conn.commit()
 
 
 def audit(limit: int = 100):
     with _db() as conn:
-        rows = conn.execute(
-            "SELECT id,created_at,action,target,result FROM audit_log ORDER BY id DESC LIMIT ?",
-            (max(1, min(int(limit), 500)),),
-        ).fetchall()
+        rows = conn.execute("SELECT id,created_at,action,target,result FROM audit_log ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
     return [dict(zip(("id", "created_at", "action", "target", "result"), row)) for row in rows]
 
 
 def detect(vps_id: int):
     row = _get_vps(vps_id)
-    probe = r'''printf '__XFI__\n'; printf 'hostname='; hostname 2>/dev/null; printf '\nos='; . /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME"; printf '\n'; printf 'xui='; systemctl list-unit-files 2>/dev/null | grep -E '^(x-ui|3x-ui)\.service' | tr '\n' ','; printf '\nxray='; systemctl list-unit-files 2>/dev/null | grep '^xray\.service' | tr '\n' ','; printf '\nnginx='; systemctl list-unit-files 2>/dev/null | grep '^nginx\.service' | tr '\n' ','; printf '\ndocker='; command -v docker >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nyadrenovpn='; pgrep -af 'YadrenoVPN|yadrenovpn' 2>/dev/null | head -3 | tr '\n' ';'; printf '\nopenclaw='; command -v openclaw >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nopenclaw_gateway='; systemctl --user is-active openclaw-gateway 2>/dev/null || true; printf '\n''' 
+    probe = r'''printf '__XFI__\n'; printf 'hostname='; hostname 2>/dev/null; printf '\nos='; . /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME"; printf '\n'; printf 'xui='; systemctl list-unit-files 2>/dev/null | grep -E '^(x-ui|3x-ui)\.service' | tr '\n' ','; printf '\nxray='; systemctl list-unit-files 2>/dev/null | grep '^xray\.service' | tr '\n' ','; printf '\nnginx='; systemctl list-unit-files 2>/dev/null | grep '^nginx\.service' | tr '\n' ','; printf '\ndocker='; command -v docker >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nyadrenovpn='; pgrep -af 'YadrenoVPN|yadrenovpn' 2>/dev/null | head -3 | tr '\n' ';'; printf '\nopenclaw='; command -v openclaw >/dev/null 2>&1 && printf 'installed' || printf 'absent'; printf '\nopenclaw_gateway='; systemctl --user is-active openclaw-gateway 2>/dev/null || true; printf '\n'''
     try:
         rc, out = _run_ssh(row, probe)
         ok = rc == 0 and "__XFI__" in out
         with _db() as conn:
-            conn.execute(
-                "UPDATE vps SET last_check=?,last_ok=?,last_error=? WHERE id=?",
-                (time.time(), int(ok), "" if ok else out[-1000:], vps_id),
-            )
+            conn.execute("UPDATE vps SET last_check=?,last_ok=?,last_error=? WHERE id=?", (time.time(), int(ok), "" if ok else out[-1000:], vps_id))
             conn.commit()
         _audit("detect", row[2], "ok" if ok else out[-1000:])
         return {"ok": ok, "raw": out}
     except Exception as exc:
         with _db() as conn:
-            conn.execute(
-                "UPDATE vps SET last_check=?,last_ok=0,last_error=? WHERE id=?",
-                (time.time(), str(exc)[:1000], vps_id),
-            )
+            conn.execute("UPDATE vps SET last_check=?,last_ok=0,last_error=? WHERE id=?", (time.time(), str(exc)[:1000], vps_id))
             conn.commit()
         _audit("detect", row[2], str(exc))
         return {"ok": False, "error": str(exc)}
@@ -176,13 +147,7 @@ def safe_restart(vps_id: int, service: str):
     if service not in ALLOWED_SERVICES:
         raise ValueError("Service is not allowed")
     row = _get_vps(vps_id)
-    # Fixed allowlist means the AI/UI cannot inject an arbitrary systemctl target.
-    remote = (
-        f"systemctl is-active --quiet {shlex.quote(service)} "
-        f"&& systemctl restart {shlex.quote(service)} "
-        f"&& systemctl is-active {shlex.quote(service)} "
-        f"|| systemctl is-active {shlex.quote(service)}"
-    )
+    remote = f"systemctl is-active --quiet {service} || exit 4; systemctl restart {service} || exit 5; systemctl is-active {service}"
     rc, out = _run_ssh(row, remote)
     ok = rc == 0 and out.splitlines()[-1:] == ["active"]
     _audit("restart", f"{row[2]}:{service}", "ok" if ok else out[-1000:])
