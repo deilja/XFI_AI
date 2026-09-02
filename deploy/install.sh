@@ -8,6 +8,14 @@ say(){ printf '\n==> %s\n' "$*"; }; fail(){ echo "[ERROR] $*" >&2; exit 1; }
 valid_domain(){ [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" != *..* ]]; }
 port_free(){ ! ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])$1$"; }
 find_port(){ local p; for p in $(seq "$DEFAULT_PORT" 8199); do port_free "$p" && { echo "$p"; return; }; done; fail "Нет свободного порта 8091-8199."; }
+validate_provider_order(){
+  local item
+  [[ -n "$1" ]] || return 1
+  IFS=',' read -ra items <<< "$1"
+  for item in "${items[@]}"; do
+    [[ "$item" =~ ^(groq|gemini|openrouter|mistral|sambanova|cerebras|huggingface|cohere)$ ]] || return 1
+  done
+}
 
 say "XFI AI Gateway — Multi-AI установка"
 [[ -r /etc/os-release ]] && . /etc/os-release || true
@@ -31,13 +39,14 @@ read -rsp "Cohere API key: " COHERE_KEY; echo
 [[ -n "$GROQ_KEY$GEMINI_KEY$OPENROUTER_KEY$MISTRAL_KEY$SAMBANOVA_KEY$CEREBRAS_KEY$HF_KEY$COHERE_KEY" ]] || fail "Нужен хотя бы один AI provider."
 PROVIDERS=""; addp(){ [[ -n "$2" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}$1"; }; addp groq "$GROQ_KEY"; addp gemini "$GEMINI_KEY"; addp openrouter "$OPENROUTER_KEY"; addp mistral "$MISTRAL_KEY"; addp sambanova "$SAMBANOVA_KEY"; addp cerebras "$CEREBRAS_KEY"; addp huggingface "$HF_KEY"; addp cohere "$COHERE_KEY"
 echo "Порядок failover: $PROVIDERS"; read -rp "Изменить порядок? [Enter = оставить]: " CUSTOM; PROVIDERS="${CUSTOM:-$PROVIDERS}"
+validate_provider_order "$PROVIDERS" || fail "Некорректный порядок провайдеров. Разрешены: groq,gemini,openrouter,mistral,sambanova,cerebras,huggingface,cohere."
 read -rsp "Админ-ключ [Enter = сгенерировать]: " ADMIN_KEY; echo; ADMIN_KEY="${ADMIN_KEY:-$(openssl rand -hex 32)}"; [[ ${#ADMIN_KEY} -ge 24 ]] || fail "Админ-ключ слишком короткий."
 PEPPER="$(openssl rand -hex 32)"
 
 say "Пакеты"; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y python3 python3-venv python3-pip nginx curl openssl ca-certificates certbot python3-certbot-nginx
 say "Приложение"; id xfi-ai >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin xfi-ai; install -d -o xfi-ai -g xfi-ai "$APP_DIR" "$ENV_DIR" /var/lib/xfi-ai
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"; [[ -f "$REPO_ROOT/app/api.py" && -f "$REPO_ROOT/app/providers.py" ]] || fail "Запускайте скрипт из клонированного XFI_AI."
-cp -a "$REPO_ROOT"/. "$APP_DIR/"; chown -R xfi-ai:xfi-ai "$APP_DIR" /var/lib/xfi-ai; sudo -u xfi-ai python3 -m venv "$APP_DIR/venv"; "$APP_DIR/venv/bin/pip" install --upgrade pip; "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+cp -a "$REPO_ROOT"/. "$APP_DIR/"; chown -R xfi-ai:xfi-ai "$APP_DIR" /var/lib/xfi-ai; runuser -u xfi-ai -- python3 -m venv "$APP_DIR/venv"; "$APP_DIR/venv/bin/pip" install --upgrade pip; "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 say "Секреты"; umask 077; cat > "$ENV_FILE" <<EOF
 GROQ_API_KEY=$GROQ_KEY
@@ -95,6 +104,10 @@ server {
  client_max_body_size 2m;
  proxy_read_timeout 130s;
  proxy_send_timeout 130s;
+ add_header X-Content-Type-Options "nosniff" always;
+ add_header X-Frame-Options "DENY" always;
+ add_header Referrer-Policy "no-referrer" always;
+ add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
  location / {
   proxy_pass http://127.0.0.1:$PORT;
   proxy_http_version 1.1;
