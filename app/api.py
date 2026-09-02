@@ -1,4 +1,5 @@
 import hmac
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .key_store import create_key, delete_key, list_keys, set_active, update_limits, valid_key, consume
 from .metrics import snapshot
@@ -23,6 +25,22 @@ OPENCLAW_ALLOWED = {
     "cron": ["openclaw", "cron", "list"],
     "heartbeat": ["openclaw", "system", "heartbeat", "last"],
 }
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+        if request.url.scheme == "https":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 def require_proxy_key(authorization: str | None) -> str:
@@ -54,8 +72,8 @@ async def read_json(request: Request, max_bytes: int = 65536) -> dict:
     if len(body) > max_bytes:
         raise HTTPException(413, "JSON request too large")
     try:
-        data = request.json if False else __import__("json").loads(body)
-    except (UnicodeDecodeError, __import__("json").JSONDecodeError) as exc:
+        data = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(400, "Invalid JSON") from exc
     if not isinstance(data, dict):
         raise HTTPException(400, "JSON body must be an object")
@@ -114,7 +132,7 @@ async def admin_provider_test(request: Request, x_admin_key: str | None = Header
     body = await read_json(request)
     key = str(body.get("key", ""))
     provider = str(body.get("provider", ""))
-    if not key or not provider:
+    if not key or len(key) > 1000 or not provider or len(provider) > 100:
         raise HTTPException(400, "provider and key are required")
     return await test_provider_key(provider, key)
 
@@ -155,7 +173,7 @@ async def admin_restart(service: str, x_admin_key: str | None = Header(default=N
     require_admin(x_admin_key)
     if service not in ALLOWED_SERVICES:
         raise HTTPException(400, "Service is not allowed")
-    rc, out = run_command(["systemctl", "restart", service], timeout=15)
+    rc, _ = run_command(["systemctl", "restart", service], timeout=15)
     if rc != 0:
         raise HTTPException(502, "Restart failed")
     rc2, state = run_command(["systemctl", "is-active", service])
