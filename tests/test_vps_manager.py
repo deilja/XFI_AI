@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 import app.vps_manager as vm
@@ -46,6 +44,6 @@ def test_safe_restart_allows_inactive_existing_service(monkeypatch):
     assert "is-active --quiet xray || exit 4" not in calls[0]
 
 
-def test_safe_restart_rejects_non_allowlisted_service(monkeypatch):
+def test_safe_restart_rejects_non_allowlisted_service():
     with pytest.raises(ValueError, match="not allowed"):
         vm.safe_restart(1, "xray;id")
