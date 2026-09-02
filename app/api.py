@@ -5,7 +5,7 @@ import hmac
 import json
 import os
 import secrets
-import subprocess
+import subprocess  # nosec B404 - only fixed allowlisted local commands are executed
 import time
 from pathlib import Path
 
@@ -107,7 +107,9 @@ def require_proxy_key(authorization: str | None) -> str:
 
 def run_command(args: list[str], timeout: int = 8) -> tuple[int, str]:
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        p = subprocess.run(  # nosec B603 - shell=False; callers use fixed allowlisted command arrays
+            args, capture_output=True, text=True, timeout=timeout, check=False
+        )
         return p.returncode, (p.stdout + p.stderr).strip()[-5000:]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
@@ -334,25 +336,18 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         raise HTTPException(400, str(exc)) from exc
     except TypeError as exc:
         raise HTTPException(400, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"AI upstream error: {type(exc).__name__}") from exc
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise HTTPException(502, "AI provider returned invalid JSON") from exc
+        raise HTTPException(502, "AI provider unavailable") from exc
+    except Exception as exc:
+        raise HTTPException(503, "AI provider unavailable") from exc
     if response.status_code >= 400:
         return JSONResponse(
             {"error": {"message": "AI provider request failed", "type": "upstream_error", "code": "upstream_http_error"}},
             status_code=502,
             headers={"X-XFI-AI-Provider": provider},
         )
-    if isinstance(data, dict):
-        data.setdefault("xfi", {})["provider"] = provider
-    return JSONResponse(data, status_code=response.status_code, headers={"X-XFI-AI-Provider": provider})
-
-
-@app.get("/")
-async def site():
-    return FileResponse(WEB_DIR / "index.html")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(502, "AI provider returned invalid JSON") from exc
+    return JSONResponse(payload, headers={"X-XFI-AI-Provider": provider})
