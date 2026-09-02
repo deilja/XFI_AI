@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -13,13 +14,22 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .key_store import create_key, delete_key, list_keys, set_active, update_limits, valid_key, consume
+from .key_store import (
+    consume,
+    create_key,
+    delete_key,
+    list_keys,
+    set_active,
+    update_limits,
+    valid_key,
+)
 from .metrics import snapshot
 from .providers import complete, configured_providers, detect_provider_key, test_provider_key
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 ADMIN_SESSION_TTL = 15 * 60
+PROVIDER_DETECT_COOLDOWN = 10.0
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
@@ -30,6 +40,8 @@ OPENCLAW_ALLOWED = {
     "cron": ["openclaw", "cron", "list"],
     "heartbeat": ["openclaw", "system", "heartbeat", "last"],
 }
+_provider_detect_lock = asyncio.Lock()
+_provider_detect_last = 0.0
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -194,7 +206,13 @@ async def admin_provider_detect(request: Request, x_admin_key: str | None = Head
     key = str(body.get("key", ""))
     if not key or len(key) > 1000:
         raise HTTPException(400, "valid key is required")
-    return {"results": await detect_provider_key(key)}
+    global _provider_detect_last
+    async with _provider_detect_lock:
+        remaining = PROVIDER_DETECT_COOLDOWN - (time.monotonic() - _provider_detect_last)
+        if remaining > 0:
+            raise HTTPException(429, "Provider detection is rate limited")
+        _provider_detect_last = time.monotonic()
+        return {"results": await detect_provider_key(key)}
 
 
 @app.get("/admin/openclaw")
@@ -309,6 +327,8 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         response, provider = await complete(body)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except TypeError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     except httpx.HTTPError as exc:
@@ -317,6 +337,12 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         data = response.json()
     except ValueError as exc:
         raise HTTPException(502, "AI provider returned invalid JSON") from exc
+    if response.status_code >= 400:
+        return JSONResponse(
+            {"error": {"message": "AI provider request failed", "type": "upstream_error", "code": "upstream_http_error"}},
+            status_code=502,
+            headers={"X-XFI-AI-Provider": provider},
+        )
     if isinstance(data, dict):
         data.setdefault("xfi", {})["provider"] = provider
     return JSONResponse(data, status_code=response.status_code, headers={"X-XFI-AI-Provider": provider})
