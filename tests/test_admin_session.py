@@ -9,6 +9,8 @@ def client(monkeypatch):
     monkeypatch.setenv("XFI_AI_ADMIN_KEY", "test-admin-key")
     import app.api as api
     api.ADMIN_KEY = "test-admin-key"
+    monkeypatch.setattr(api, "snapshot", lambda: [])
+    monkeypatch.setattr(api, "configured_providers", lambda: [])
     return TestClient(api.app)
 
 
@@ -30,6 +32,7 @@ def test_admin_endpoint_accepts_session_token(client):
     token = login.headers["X-XFI-Admin-Session"]
     response = client.get("/admin/providers", headers={"X-Admin-Session": token})
     assert response.status_code == 200
+    assert response.json() == {"providers": [], "configured": []}
 
 
 def test_expired_admin_session_is_rejected(client, monkeypatch):
