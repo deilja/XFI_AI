@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-import subprocess
+import subprocess  # nosec B404 - subprocess is required for fixed-argument SSH execution
 import time
 from pathlib import Path
 
@@ -108,7 +108,9 @@ def _run_ssh(row, remote: str):
     args = _ssh_base(row)
     if not remote or len(remote) > 12000:
         raise ValueError("remote command is empty or too long")
-    proc = subprocess.run(args + [remote], capture_output=True, text=True, timeout=20, check=False, env=os.environ.copy())
+    proc = subprocess.run(  # nosec B603 - shell=False; executable and arguments are constructed from validated inputs
+        args + [remote], capture_output=True, text=True, timeout=20, check=False, env=os.environ.copy()
+    )
     return proc.returncode, (proc.stdout + proc.stderr).strip()[-8000:]
 
 
