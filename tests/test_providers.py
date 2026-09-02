@@ -27,6 +27,7 @@ async def test_complete_reports_actual_last_provider(monkeypatch):
 
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **kwargs: FakeClient())
     monkeypatch.setattr(providers, "_state", {})
+    monkeypatch.setattr(providers, "record", lambda *args, **kwargs: None)
     response, provider = await providers.complete(json.dumps({"messages": []}).encode())
     assert response.status_code == 500
     assert provider == "gemini"
