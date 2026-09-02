@@ -35,6 +35,7 @@ def test_admin_endpoint_accepts_session_token(client):
 def test_expired_admin_session_is_rejected(client, monkeypatch):
     login = client.post("/admin/session", json={"key": "test-admin-key"})
     token = login.headers["X-XFI-Admin-Session"]
-    monkeypatch.setattr("app.api.time.time", lambda: time.time() + 901)
+    original_time = time.time
+    monkeypatch.setattr("app.api.time.time", lambda: original_time() + 901)
     response = client.get("/admin/providers", headers={"X-Admin-Session": token})
     assert response.status_code == 403
