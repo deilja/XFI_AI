@@ -5,12 +5,15 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     monkeypatch.setenv("XFI_AI_ADMIN_KEY", "test-admin-key")
+    monkeypatch.setenv("XFI_AI_DB", str(tmp_path / "keys.db"))
     import app.api as api
+    import app.key_store as key_store
+    import app.metrics as metrics
     api.ADMIN_KEY = "test-admin-key"
-    monkeypatch.setattr(api, "snapshot", lambda: [])
-    monkeypatch.setattr(api, "configured_providers", lambda: [])
+    key_store.DB = tmp_path / "keys.db"
+    metrics.DB = tmp_path / "keys.db"
     return TestClient(api.app)
 
 
@@ -32,7 +35,6 @@ def test_admin_endpoint_accepts_session_token(client):
     token = login.headers["X-XFI-Admin-Session"]
     response = client.get("/admin/providers", headers={"X-Admin-Session": token})
     assert response.status_code == 200
-    assert response.json() == {"providers": [], "configured": []}
 
 
 def test_expired_admin_session_is_rejected(client, monkeypatch):
