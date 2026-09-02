@@ -1,22 +1,33 @@
 # XFI AI
 
-Мульти-AI Gateway для экосистемы XFI. Клиент подключается к вашему HTTPS-домену, а XFI AI выбирает AI-провайдера и автоматически переключается на следующий при временной ошибке.
+Мульти-AI Gateway и control-plane для экосистемы XFI. Клиент подключается к вашему HTTPS-домену, использует единый `xfi_...` API key, а XFI AI выбирает AI-провайдера и выполняет failover при временных ошибках.
 
-## OpenClaw + RouterAI + Groq + Telegram
+## Статус
 
-XFI AI включает отдельный control-plane на базе OpenClaw:
+- Production preflight: готов.
+- GitHub Actions: `CI` — SUCCESS, `Gateway CI` — SUCCESS.
+- Последний проверенный commit: `07a1efb1426e7585e4a4c0d4cdd6cd2aa1d920fb`.
+- Runtime: Python 3.11+, FastAPI, Uvicorn, HTTPX.
+
+## Архитектура
 
 ```text
 Telegram
-   │
+   │ pairing
    ▼
 OpenClaw Gateway
    │
-   ├── RouterAI → Claude Sonnet / DeepSeek
+   ├── RouterAI → Claude / DeepSeek
    └── Groq → GPT-OSS
    │
    ▼
-XFI AI / VPS
+XFI AI Gateway
+   ├── AI providers + failover
+   ├── Client API keys
+   ├── VPS Control Center
+   ├── Audit log
+   └── Web Admin
+   │
    ├── 3X-UI / X-UI
    ├── Xray
    ├── nginx
@@ -24,9 +35,96 @@ XFI AI / VPS
    └── YadrenoVPN
 ```
 
-RouterAI используется как основной AI для сложной диагностики и исправлений. Groq используется как быстрый provider и fallback. Telegram работает через pairing.
+## AI-провайдеры
 
-### Установка OpenClaw-контура
+Gateway поддерживает:
+
+- Groq
+- Google Gemini
+- Cloudflare AI
+- OpenRouter
+- Mistral
+- SambaNova
+- Cerebras
+- Hugging Face
+- Cohere
+
+Порядок failover задаётся переменной `XFI_AI_PROVIDERS`.
+
+RouterAI используется OpenClaw отдельно как основной control-plane provider и не заменяет providers Gateway.
+
+## Автоматическое определение API key
+
+Web Admin поддерживает проверку неизвестного AI API key:
+
+1. ключ вводится через защищённую административную страницу;
+2. XFI AI проверяет его против поддерживаемых providers;
+3. определяется совместимый provider и модель;
+4. показываются только безопасные метаданные: статус, provider, модель, latency и короткий fingerprint;
+5. полный ключ не сохраняется функцией автоопределения.
+
+Для Cloudflare дополнительно требуется `CLOUDFLARE_ACCOUNT_ID`.
+
+## API
+
+```text
+GET  /health
+GET  /v1/models
+POST /v1/chat/completions
+
+GET  /api/keys
+POST /api/keys
+...
+```
+
+Клиент использует один `xfi_...` ключ. Реальные API keys AI-провайдеров клиенту не выдаются.
+
+Для `/v1/chat/completions` применяются ограничения размера запроса и безопасная обработка ошибок upstream.
+
+## Web Admin
+
+Web Admin предоставляет:
+
+- создание, активацию и деактивацию XFI client keys;
+- автоматическое определение AI provider по API key;
+- метрики providers;
+- добавление VPS;
+- диагностику VPS;
+- безопасный restart разрешённых сервисов;
+- список Docker containers;
+- audit log;
+- локальный мониторинг сервисов.
+
+Административный доступ защищён отдельным `XFI_AI_ADMIN_KEY`.
+
+## VPS Control Center
+
+Для SSH разрешены только два режима:
+
+- `key` — путь к существующему приватному ключу на VPS;
+- `agent` — системный SSH agent.
+
+SSH-пароли не принимаются и не сохраняются.
+
+Валидация ограничивает host, port, username и путь к ключу. Удалённые команды не принимаются от пользователя как произвольная shell-строка.
+
+Разрешённый restart allowlist:
+
+```text
+x-ui
+3x-ui
+xray
+nginx
+docker
+```
+
+Произвольные команды, shell injection и изменение VPN-конфигурации через VPS Control Center запрещены. Диагностика и restart записываются в audit log.
+
+## OpenClaw + Telegram
+
+OpenClaw используется как отдельный control-plane для диагностики и безопасного обслуживания VPS.
+
+### Установка
 
 ```bash
 cd /opt/XFI_AI/openclaw
@@ -43,9 +141,9 @@ chmod +x install.sh xfi-vpn-heal.sh
 - задаёт primary `routerai/anthropic/claude-sonnet-4-5`;
 - задаёт fallback `groq/openai/gpt-oss-120b` и `routerai/deepseek/deepseek-chat`;
 - включает Telegram `dmPolicy: pairing`;
-- создаёт безопасный `HEARTBEAT.md`.
+- устанавливает heartbeat и безопасный workspace.
 
-Полный набор cron-команд, диагностика, pairing, модели и troubleshooting: `openclaw/CRON.md`.
+Полные команды, pairing, cron и troubleshooting: `openclaw/CRON.md`.
 
 ### Telegram pairing
 
@@ -54,94 +152,197 @@ openclaw pairing list telegram
 openclaw pairing approve telegram <КОД>
 ```
 
-После pairing доступны `/status`, `/model list` и переключение модели. Подробности находятся в `openclaw/CRON.md`.
+Telegram-доступ не открывается для неизвестных пользователей без pairing.
 
-## VPS Control Center
+## Auto-heal
 
-XFI AI содержит безопасный менеджер VPS для диагностики удалённых узлов. Для SSH разрешены только два режима:
+`openclaw/HEARTBEAT.md` и `openclaw/xfi-vpn-heal.sh` используют консервативную модель восстановления:
 
-- `key` — путь к существующему приватному ключу на сервере;
-- `agent` — системный SSH agent.
+1. проверить состояние;
+2. определить существующий проблемный сервис;
+3. выполнить не более одного безопасного restart;
+4. повторно проверить состояние;
+5. сообщить результат в Telegram при исправлении или ошибке.
 
-Хранение SSH-паролей отключено. Самодельное шифрование паролей не используется.
+Автоматически запрещено:
 
-Удалённые действия ограничены allowlist: `x-ui`, `3x-ui`, `xray`, `nginx`, `docker`. Произвольные команды и изменение VPN-конфигурации через этот контур не разрешаются. Диагностика и restart записываются в audit log.
+- удалять пользователей, inbound и ключи;
+- менять порты;
+- менять TLS или Reality;
+- менять firewall или DNS;
+- редактировать БД 3X-UI/X-UI;
+- удалять Docker volumes/containers;
+- обновлять Xray/3X-UI;
+- отключать UFW/Fail2Ban;
+- выполнять массовые destructive-команды.
 
-## Авто-проверка и auto-heal
-
-`openclaw/HEARTBEAT.md` ограничивает автоматические действия. Разрешён диагностический доступ и однократный restart существующего сервиса после проверки.
-
-Запрещены без явного указания администратора:
-
-- удаление пользователей, inbound и ключей;
-- изменение портов, TLS, Reality и firewall;
-- изменение базы 3X-UI/X-UI;
-- удаление Docker volumes/containers;
-- обновление Xray/3X-UI;
-- отключение UFW/Fail2Ban;
-- массовые destructive-команды.
-
-Для независимой host-проверки:
+Host-проверка вручную:
 
 ```bash
 sudo bash /opt/XFI_AI/openclaw/xfi-vpn-heal.sh
 ```
 
-## Комбо AI-провайдеров
+## Production preflight
 
-XFI AI Gateway поддерживает Groq, Google Gemini, Cloudflare, OpenRouter Free, Mistral, SambaNova, Cerebras, Hugging Face и Cohere. Их порядок задаётся `XFI_AI_PROVIDERS`.
+Перед установкой можно выполнить read-only проверку репозитория и окружения:
 
-OpenClaw добавляет RouterAI отдельно и не удаляет существующие XFI AI providers.
-
-## API XFI AI
-
-```text
-POST https://<your-domain>/v1/chat/completions
-GET  https://<your-domain>/v1/models
-GET  https://<your-domain>/health
+```bash
+bash deploy/preflight.sh
 ```
 
-Клиент использует один `xfi_...` ключ и не получает реальные ключи AI-провайдеров.
+Скрипт проверяет:
+
+- Ubuntu и Python;
+- обязательные команды;
+- структуру проекта;
+- Python compile check;
+- весь `pytest` suite;
+- nginx configuration;
+- systemd service;
+- локальный порт;
+- наличие Let's Encrypt directory.
+
+Успешный результат заканчивается:
+
+```text
+PREFLIGHT: READY
+```
+
+При обязательной ошибке:
+
+```text
+PREFLIGHT: FAILED
+```
 
 ## Установка XFI AI
 
 ```bash
 git clone https://github.com/deilja/XFI_AI.git
 cd XFI_AI
+bash deploy/preflight.sh
 chmod +x deploy/install.sh
 sudo ./deploy/install.sh
 ```
 
-Установщик спрашивает домен, предлагает свободный локальный порт, принимает ключи провайдеров скрытым вводом, создаёт пользователя `xfi-ai`, systemd service, nginx reverse proxy и HTTPS.
+Установщик:
+
+- запрашивает домен;
+- определяет публичный IPv4;
+- предлагает свободный локальный порт;
+- принимает API keys providers через скрытый ввод;
+- позволяет задать порядок providers;
+- создаёт `xfi-ai` system user;
+- создаёт Python venv;
+- устанавливает зависимости;
+- создаёт systemd service;
+- настраивает nginx reverse proxy;
+- настраивает HTTPS через Certbot при корректном DNS;
+- создаёт `/etc/xfi-ai/xfi-ai.env` с правами `600`;
+- создаёт административный ключ, если он не задан вручную;
+- выполняет локальный `/health` smoke check.
+
+### Основные пути после установки
+
+```text
+/opt/xfi-ai/
+/etc/xfi-ai/xfi-ai.env
+/var/lib/xfi-ai/keys.db
+/etc/systemd/system/xfi-ai.service
+/etc/nginx/sites-available/xfi-ai
+```
+
+## Переменные окружения
+
+Минимальный пример находится в `.env.example`.
+
+Основные параметры:
+
+```env
+GROQ_API_KEY=
+GEMINI_API_KEY=
+CLOUDFLARE_API_TOKEN=
+CLOUDFLARE_ACCOUNT_ID=
+OPENROUTER_API_KEY=
+MISTRAL_API_KEY=
+SAMBANOVA_API_KEY=
+CEREBRAS_API_KEY=
+HF_TOKEN=
+COHERE_API_KEY=
+
+ROUTERAI_API_KEY=
+TELEGRAM_BOT_TOKEN=
+OPENCLAW_HEARTBEAT=15m
+
+XFI_AI_PROVIDERS=groq,gemini,cloudflare,openrouter,mistral,sambanova,cerebras,huggingface,cohere
+
+XFI_AI_ADMIN_KEY=
+XFI_AI_DB=/var/lib/xfi-ai/keys.db
+XFI_AI_KEY_PEPPER=
+```
+
+Конкретные модели можно переопределить через `*_MODEL`. Полный пример находится в `.env.example`.
+
+## Systemd и права
+
+Production service запускается не от root, а от пользователя `xfi-ai`. Для systemd включены ограничения:
+
+- `NoNewPrivileges=true`
+- `PrivateTmp=true`
+- `ProtectSystem=strict`
+- `ProtectHome=true`
+- запись только в `/var/lib/xfi-ai`
+
+Uvicorn слушает localhost, внешний доступ выполняет nginx.
 
 ## Безопасность
 
-Реальные AI keys находятся только на VPS. Не добавляйте `.env`, Telegram token или RouterAI/Groq keys в Git. OpenClaw Telegram-доступ должен использовать pairing. Для автоматического ремонта применяются консервативные правила из `openclaw/HEARTBEAT.md`.
+- Реальные AI keys находятся только на VPS.
+- Секреты не должны попадать в Git.
+- `.env`, Telegram token, RouterAI/Groq keys и admin key нельзя публиковать.
+- SSH password authentication для VPS Control Center отключена.
+- API credentials ограничиваются по размеру и проверяются безопасно.
+- Admin key сравнивается constant-time.
+- OpenClaw использует fixed command allowlists для административных операций.
+- Restart разрешён только для заранее определённых сервисов.
+- Аудит административных операций сохраняется в SQLite.
 
-## Быстрая схема
+## Тестирование
 
-```text
-                ┌──────────────┐
-                │   Telegram   │
-                └──────┬───────┘
-                       │ pairing
-                       ▼
-                ┌──────────────┐
-                │   OpenClaw   │
-                └──────┬───────┘
-                 ┌─────┴─────┐
-                 ▼           ▼
-            ┌────────┐   ┌────────┐
-            │RouterAI│   │  Groq  │
-            └────┬───┘   └───┬────┘
-                 └─────┬─────┘
-                       ▼
-                ┌──────────────┐
-                │    XFI AI    │
-                └──────┬───────┘
-                       ▼
-          ┌────────────────────────┐
-          │ 3X-UI / Xray / nginx   │
-          │ Docker / YadrenoVPN    │
-          └────────────────────────┘
+Локальный запуск тестов:
+
+```bash
+python3 -m pytest -q tests
 ```
+
+Проверка синтаксиса приложения:
+
+```bash
+python3 -m compileall -q app
+```
+
+Production preflight:
+
+```bash
+bash deploy/preflight.sh
+```
+
+GitHub Actions автоматически проверяет проект. Последний production-preflight commit прошёл оба workflow: `CI` и `Gateway CI`.
+
+## Операционные команды OpenClaw
+
+```bash
+openclaw gateway status
+openclaw gateway restart
+openclaw models list
+openclaw models set routerai/anthropic/claude-sonnet-4-5
+openclaw pairing list telegram
+openclaw cron list
+openclaw system heartbeat last
+journalctl -u openclaw -f
+```
+
+Подробная эксплуатационная документация: `openclaw/CRON.md`.
+
+## Лицензия
+
+Проект развивается как часть экосистемы XFI. Лицензионные условия следует проверять в текущем состоянии репозитория.
