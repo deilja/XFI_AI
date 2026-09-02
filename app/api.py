@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .key_store import create_key, delete_key, list_keys, set_active, update_limits, valid_key, consume
 from .metrics import snapshot
-from .providers import complete, configured_providers
+from .providers import complete, configured_providers, detect_provider_key, test_provider_key
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
@@ -80,6 +80,27 @@ async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | Non
 async def admin_providers(x_admin_key: str | None = Header(default=None)):
     require_admin(x_admin_key)
     return {"providers": snapshot()}
+
+
+@app.post("/admin/providers/test")
+async def admin_provider_test(request: Request, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    body = await request.json()
+    key = str(body.get("key", ""))
+    provider = str(body.get("provider", ""))
+    if not key or not provider:
+        raise HTTPException(400, "provider and key are required")
+    return await test_provider_key(provider, key)
+
+
+@app.post("/admin/providers/detect")
+async def admin_provider_detect(request: Request, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    body = await request.json()
+    key = str(body.get("key", ""))
+    if not key:
+        raise HTTPException(400, "key is required")
+    return {"results": await detect_provider_key(key)}
 
 
 @app.get("/admin/system")
