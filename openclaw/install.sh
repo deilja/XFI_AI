@@ -80,9 +80,19 @@ PY
 cp -f "$(dirname "$0")/HEARTBEAT.md" "$WORKSPACE/HEARTBEAT.md"
 chmod 600 "$WORKSPACE/HEARTBEAT.md"
 
-if command -v openclaw >/dev/null 2>&1; then
-  openclaw gateway restart || openclaw gateway start || true
-  openclaw models status || true
+openclaw system heartbeat enable || true
+openclaw gateway restart || openclaw gateway start || true
+openclaw models status || true
+
+# Optional 10-minute isolated health session. Do not create a duplicate on rerun.
+if ! openclaw cron list 2>/dev/null | grep -q 'vpn-heal'; then
+  openclaw cron add \
+    --name "vpn-heal" \
+    --cron "*/10 * * * *" \
+    --session isolated \
+    --message "Проверь 3X-UI/X-UI, xray, nginx и docker. Используй только правила openclaw/HEARTBEAT.md. Если сервис упал — безопасно перезапусти только существующий сервис один раз. Не меняй пользователей, ключи, inbound, порты, TLS, firewall или базу. Если исправил или не смог поднять — сообщи администратору в Telegram. Если всё нормально — молчи." \
+    --announce \
+    --channel telegram || true
 fi
 
 echo
@@ -90,5 +100,6 @@ echo "XFI AI OpenClaw integration configured."
 echo "Config: $CONFIG"
 echo "Env:    $ENV"
 echo "Heartbeat: $WORKSPACE/HEARTBEAT.md"
+echo "Cron: vpn-heal (*/10 * * * *)"
 echo "Next: openclaw pairing list telegram"
 echo "Then: openclaw pairing approve telegram <CODE>"
