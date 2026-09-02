@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import ALLOWED_SERVICES, OPENCLAW_ALLOWED, require_admin, require_proxy_key
@@ -7,22 +8,16 @@ from app.vps_manager import _HOST_RE, _ssh_base, add_vps, safe_restart
 
 def test_proxy_key_rejects_empty_or_oversized_credentials():
     for value in ("", "x" * 513):
-        try:
+        with pytest.raises(HTTPException) as exc_info:
             require_proxy_key(f"Bearer {value}")
-        except Exception as exc:
-            assert getattr(exc, "status_code", None) == 401
-        else:
-            raise AssertionError("invalid credential was accepted")
+        assert exc_info.value.status_code == 401
 
 
 def test_admin_key_requires_configured_secret(monkeypatch):
     monkeypatch.setattr("app.api.ADMIN_KEY", "secret")
-    try:
+    with pytest.raises(HTTPException) as exc_info:
         require_admin("wrong")
-    except Exception as exc:
-        assert getattr(exc, "status_code", None) == 403
-    else:
-        raise AssertionError("invalid admin credential was accepted")
+    assert exc_info.value.status_code == 403
 
 
 def test_restart_allowlist_is_restricted():
