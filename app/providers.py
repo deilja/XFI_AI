@@ -82,17 +82,11 @@ def _url(p: Provider) -> str:
 
 
 def _key_fingerprint(key: str) -> str:
-    # Never return or log the secret. This is only a UI-safe identifier.
     import hashlib
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
-    """Test one supplied API key without storing it.
-
-    The request is a minimal chat completion. The response contains only
-    provider/status/latency/model/fingerprint and never the supplied secret.
-    """
     provider = next((p for p in PROVIDERS if p.name == provider_name.lower()), None)
     if not provider:
         return {"ok": False, "provider": provider_name, "error": "Unknown provider"}
@@ -104,25 +98,18 @@ async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-            response = await client.post(
-                _url(provider),
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=payload,
-            )
+            response = await client.post(_url(provider), headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, json=payload)
         latency_ms = round((time.monotonic() - started) * 1000, 1)
         ok = response.status_code < 400
-        if ok:
-            return {"ok": True, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
-        return {"ok": False, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key), "error": "Provider rejected the key or request"}
+        result = {"ok": ok, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
+        if not ok:
+            result["error"] = "Provider rejected the key or request"
+        return result
     except httpx.HTTPError as exc:
         return {"ok": False, "provider": provider.name, "model": provider.model, "latency_ms": round((time.monotonic() - started) * 1000, 1), "fingerprint": _key_fingerprint(key), "error": type(exc).__name__}
 
 
 async def detect_provider_key(key: str) -> list[dict[str, Any]]:
-    """Try the same key against every configured provider endpoint.
-
-    No key is persisted. Results are intentionally metadata-only.
-    """
     if not key or len(key) > 1000:
         return []
     results: list[dict[str, Any]] = []
@@ -134,20 +121,28 @@ async def detect_provider_key(key: str) -> list[dict[str, Any]]:
 
 
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
+    try:
+        payload: dict[str, Any] = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid JSON request body") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("JSON request body must be an object")
     providers = sorted(configured_providers(), key=_score)
     if not providers:
         raise RuntimeError("No AI providers are configured")
     last_error: Exception | None = None
     last_response: httpx.Response | None = None
+    last_provider: str | None = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
         for provider in providers:
             started = time.monotonic()
             try:
-                payload: dict[str, Any] = json.loads(body)
-                payload["model"] = provider.model
-                response = await client.post(_url(provider), headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=payload)
+                request_payload = dict(payload)
+                request_payload["model"] = provider.model
+                response = await client.post(_url(provider), headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=request_payload)
                 latency = time.monotonic() - started
                 last_response = response
+                last_provider = provider.name
                 if response.status_code < 400:
                     _record(provider, True, latency, response.status_code)
                     return response, provider.name
@@ -158,8 +153,9 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
                 latency = time.monotonic() - started
                 _record(provider, False, latency)
                 last_error = exc
-    if last_response is not None:
-        return last_response, providers[-1].name
+                last_provider = provider.name
+    if last_response is not None and last_provider is not None:
+        return last_response, last_provider
     if last_error:
         raise last_error
     raise RuntimeError("No AI providers are available")
