@@ -1,5 +1,6 @@
 import hmac
 import os
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -13,6 +14,8 @@ from .providers import complete, configured_providers
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
+
+ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 
 
 def require_proxy_key(authorization: str | None) -> str:
@@ -29,6 +32,14 @@ def require_proxy_key(authorization: str | None) -> str:
 def require_admin(key: str | None) -> None:
     if not ADMIN_KEY or not key or not hmac.compare_digest(key, ADMIN_KEY):
         raise HTTPException(403, "Forbidden")
+
+
+def run_command(args: list[str], timeout: int = 8) -> tuple[int, str]:
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        return p.returncode, (p.stdout + p.stderr).strip()[-5000:]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
 
 
 @app.get("/health")
@@ -69,6 +80,29 @@ async def admin_key_limits(key_id: int, request: Request, x_admin_key: str | Non
 async def admin_providers(x_admin_key: str | None = Header(default=None)):
     require_admin(x_admin_key)
     return {"providers": snapshot()}
+
+
+@app.get("/admin/system")
+async def admin_system(x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    services = []
+    for name in sorted(ALLOWED_SERVICES):
+        rc, out = run_command(["systemctl", "is-active", name])
+        services.append({"name": name, "active": rc == 0 and out.splitlines()[-1:] == ["active"], "status": out or "unknown"})
+    rc, docker = run_command(["docker", "ps", "--format", "{{.Names}}|{{.Status}}"], timeout=5)
+    return {"services": services, "docker": docker.splitlines() if rc == 0 and docker else []}
+
+
+@app.post("/admin/system/{service}/restart")
+async def admin_restart(service: str, x_admin_key: str | None = Header(default=None)):
+    require_admin(x_admin_key)
+    if service not in ALLOWED_SERVICES:
+        raise HTTPException(400, "Service is not allowed")
+    rc, out = run_command(["systemctl", "restart", service], timeout=15)
+    if rc != 0:
+        raise HTTPException(502, f"Restart failed: {out[-1000:]}")
+    rc2, state = run_command(["systemctl", "is-active", service])
+    return {"ok": rc2 == 0, "service": service, "status": state}
 
 
 @app.post("/api/keys")
