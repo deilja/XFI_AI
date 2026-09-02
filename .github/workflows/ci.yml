@@ -25,4 +25,4 @@ jobs:
       - name: Dependency audit
         run: python -m pip install 'pip-audit>=2.7,<3' && pip-audit
       - name: Shell syntax
-        run: bash -n deploy/install.sh deploy/preflight.sh openclaw/install.sh openclaw/verify.sh openclaw/xfi-vpn-heal.sh
+        run: bash -n deploy/install.sh deploy/preflight.sh deploy/smoke_test.sh openclaw/install.sh openclaw/verify.sh openclaw/xfi-vpn-heal.sh
