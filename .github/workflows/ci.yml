@@ -18,3 +18,9 @@ jobs:
         run: python -m pip install -e '.[test]'
       - name: Test
         run: python -m pytest -q
+      - name: Ruff
+        run: python -m pip install 'ruff>=0.6,<1' && ruff check app tests
+      - name: Bandit
+        run: python -m pip install 'bandit>=1.7,<2' && bandit -q -r app
+      - name: Dependency audit
+        run: python -m pip install 'pip-audit>=2.7,<3' && pip-audit
