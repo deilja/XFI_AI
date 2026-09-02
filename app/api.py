@@ -351,3 +351,8 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     except ValueError as exc:
         raise HTTPException(502, "AI provider returned invalid JSON") from exc
     return JSONResponse(payload, headers={"X-XFI-AI-Provider": provider})
+
+
+@app.get("/")
+async def site():
+    return FileResponse(WEB_DIR / "index.html")
