@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import time
@@ -82,7 +83,6 @@ def _url(p: Provider) -> str:
 
 
 def _key_fingerprint(key: str) -> str:
-    import hashlib
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
@@ -126,7 +126,7 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid JSON request body") from exc
     if not isinstance(payload, dict):
-        raise ValueError("JSON request body must be an object")
+        raise TypeError("JSON request body must be an object")
     providers = sorted(configured_providers(), key=_score)
     if not providers:
         raise RuntimeError("No AI providers are configured")
