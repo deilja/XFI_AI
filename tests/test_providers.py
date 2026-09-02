@@ -32,8 +32,21 @@ async def test_complete_reports_actual_last_provider(monkeypatch):
     assert provider == "gemini"
 
 
-def test_complete_rejects_invalid_json_before_provider_call():
+@pytest.mark.asyncio
+async def test_complete_rejects_invalid_json_before_provider_call(monkeypatch):
+    called = False
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+        async def post(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **kwargs: FakeClient())
     with pytest.raises(ValueError, match="Invalid JSON"):
-        # Calling the coroutine body is enough to verify the synchronous
-        # validation only when awaited; this test is covered by API tests.
-        pass
+        await providers.complete(b"{invalid-json")
+    assert called is False
