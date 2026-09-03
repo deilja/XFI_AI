@@ -9,6 +9,9 @@ API_KEY="${XFI_AI_API_KEY:-}"
 
 BASE_URL="${BASE_URL%/}"
 
+headers="$(curl -fsSI --max-time 10 "$BASE_URL/health")"
+grep -qi '^x-content-type-options: nosniff' <<<"$headers"
+grep -qi '^x-frame-options: DENY' <<<"$headers"
 curl -fsS --max-time 10 "$BASE_URL/health" | grep -q '"status":"ok"'
 curl -fsS --max-time 10 -H "Authorization: Bearer $API_KEY" "$BASE_URL/v1/models" | grep -q '"object":"list"'
 
@@ -23,6 +26,13 @@ if curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Authorization: Bear
   :
 else
   echo "Expected 401 for invalid API key" >&2
+  exit 1
+fi
+
+if curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Authorization: Bearer $API_KEY" --data-binary '{invalid-json' "$BASE_URL/v1/chat/completions" | grep -q '^400$'; then
+  :
+else
+  echo "Expected 400 for malformed JSON" >&2
   exit 1
 fi
 
