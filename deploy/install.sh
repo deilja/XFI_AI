@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-APP_DIR="/opt/xfi-ai"; ENV_DIR="/etc/xfi-ai"; ENV_FILE="$ENV_DIR/xfi-ai.env"; SERVICE="xfi-ai"; DEFAULT_PORT=8091
+APP_DIR="/opt/xfi-ai"; ENV_DIR="/etc/xfi-ai"; ENV_FILE="$ENV_DIR/xfi-ai.env"; SERVICE="xfi-ai"; BOT_SERVICE="xfi-ai-telegram"; DEFAULT_PORT=8091
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 trap 'echo "[ERROR] Строка $LINENO: установка остановлена." >&2' ERR
 [[ $EUID -eq 0 ]] || { echo "Запустите от root: sudo bash deploy/install.sh"; exit 1; }
@@ -26,6 +26,14 @@ SUGGESTED_PORT="$(find_port)"; echo "Предложенный свободный
 read -rp "Порт XFI AI [Enter = $SUGGESTED_PORT]: " PORT; PORT="${PORT:-$SUGGESTED_PORT}"
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1024 && "$PORT" -le 65535 ]] || fail "Порт должен быть 1024-65535."; port_free "$PORT" || fail "Порт занят."
 
+say "Telegram XFI AI"
+read -rsp "Telegram bot token XFI AI [Enter = отключить бота]: " TELEGRAM_BOT_TOKEN; echo
+read -rp "Telegram admin IDs через запятую [обязательно при включённом боте]: " TELEGRAM_ADMIN_IDS
+if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
+  [[ -n "$TELEGRAM_ADMIN_IDS" ]] || fail "Для Telegram-бота нужен XFI_AI_TELEGRAM_ADMIN_IDS."
+  [[ "$TELEGRAM_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Некорректный список Telegram admin IDs."
+fi
+
 say "AI-провайдеры"
 echo "Пустой ключ отключает провайдера."
 read -rsp "Groq API key: " GROQ_KEY; echo
@@ -39,7 +47,7 @@ read -rsp "Cohere API key: " COHERE_KEY; echo
 [[ -n "$GROQ_KEY$GEMINI_KEY$OPENROUTER_KEY$MISTRAL_KEY$SAMBANOVA_KEY$CEREBRAS_KEY$HF_KEY$COHERE_KEY" ]] || fail "Нужен хотя бы один AI provider."
 PROVIDERS=""; addp(){ [[ -n "$2" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}$1"; }; addp groq "$GROQ_KEY"; addp gemini "$GEMINI_KEY"; addp openrouter "$OPENROUTER_KEY"; addp mistral "$MISTRAL_KEY"; addp sambanova "$SAMBANOVA_KEY"; addp cerebras "$CEREBRAS_KEY"; addp huggingface "$HF_KEY"; addp cohere "$COHERE_KEY"
 echo "Порядок failover: $PROVIDERS"; read -rp "Изменить порядок? [Enter = оставить]: " CUSTOM; PROVIDERS="${CUSTOM:-$PROVIDERS}"
-validate_provider_order "$PROVIDERS" || fail "Некорректный порядок провайдеров. Разрешены: groq,gemini,openrouter,mistral,sambanova,cerebras,huggingface,cohere."
+validate_provider_order "$PROVIDERS" || fail "Некорректный порядок провайдеров."
 read -rsp "Админ-ключ [Enter = сгенерировать]: " ADMIN_KEY; echo; ADMIN_KEY="${ADMIN_KEY:-$(openssl rand -hex 32)}"; [[ ${#ADMIN_KEY} -ge 24 ]] || fail "Админ-ключ слишком короткий."
 PEPPER="$(openssl rand -hex 32)"
 
@@ -70,8 +78,12 @@ XFI_AI_REFERER=https://$DOMAIN
 XFI_AI_ADMIN_KEY=$ADMIN_KEY
 XFI_AI_DB=/var/lib/xfi-ai/keys.db
 XFI_AI_KEY_PEPPER=$PEPPER
+XFI_AI_TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
+XFI_AI_TELEGRAM_ADMIN_IDS=$TELEGRAM_ADMIN_IDS
+XFI_AI_BOT_TOKEN_RPM=60
+XFI_AI_BOT_TOKEN_DAILY=5000
 EOF
-unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY MISTRAL_KEY SAMBANOVA_KEY CEREBRAS_KEY HF_KEY COHERE_KEY; chmod 600 "$ENV_FILE"; chown root:xfi-ai "$ENV_FILE"
+unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY MISTRAL_KEY SAMBANOVA_KEY CEREBRAS_KEY HF_KEY COHERE_KEY TELEGRAM_BOT_TOKEN; chmod 600 "$ENV_FILE"; chown root:xfi-ai "$ENV_FILE"
 
 say "Systemd"; cat > /etc/systemd/system/$SERVICE.service <<EOF
 [Unit]
@@ -96,6 +108,34 @@ ReadWritePaths=/var/lib/xfi-ai
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload; systemctl enable --now "$SERVICE"; sleep 2; systemctl is-active --quiet "$SERVICE" || { journalctl -u "$SERVICE" -n 50 --no-pager; fail "XFI AI не запустился."; }
+
+if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
+  cat > /etc/systemd/system/$BOT_SERVICE.service <<EOF
+[Unit]
+Description=XFI AI Telegram Token Bot
+After=network-online.target $SERVICE.service
+Requires=$SERVICE.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=xfi-ai
+Group=xfi-ai
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$APP_DIR/venv/bin/python -m app.telegram_bot
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/xfi-ai
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload; systemctl enable --now "$BOT_SERVICE"; sleep 2
+  systemctl is-active --quiet "$BOT_SERVICE" || { journalctl -u "$BOT_SERVICE" -n 50 --no-pager; fail "XFI AI Telegram bot не запустился."; }
+fi
 
 say "Nginx"; cat > /etc/nginx/sites-available/xfi-ai.conf <<EOF
 server {
@@ -124,3 +164,4 @@ ln -sfn /etc/nginx/sites-available/xfi-ai.conf /etc/nginx/sites-enabled/xfi-ai.c
 say "DNS и HTTPS"; DOMAIN_IP="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"; echo "DNS: ${DOMAIN_IP:-не найден} | VPS: ${PUBLIC_IP:-не определён}"
 if [[ -n "$PUBLIC_IP" && "$DOMAIN_IP" == "$PUBLIC_IP" ]]; then certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" --redirect || echo "Certbot не получил сертификат."; else echo "Сначала направьте A-запись $DOMAIN на $PUBLIC_IP, затем: certbot --nginx -d $DOMAIN --redirect"; fi
 say "Проверка"; curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health"; echo; echo "Установка завершена: https://$DOMAIN/"; echo "API: https://$DOMAIN/v1/chat/completions"; echo "Порт: 127.0.0.1:$PORT"; echo "Админ-ключ: $ADMIN_KEY"; echo "Секреты: $ENV_FILE"
+[[ -n "$TELEGRAM_BOT_TOKEN" ]] && echo "Telegram token bot: $BOT_SERVICE"
