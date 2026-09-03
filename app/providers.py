@@ -41,6 +41,7 @@ PROVIDERS = [
     Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 9),
 ]
 
+DETECT_MAX_PROVIDERS = 4
 _state: dict[str, dict[str, float]] = {}
 
 
@@ -113,7 +114,8 @@ async def detect_provider_key(key: str) -> list[dict[str, Any]]:
     if not key or len(key) > 1000:
         return []
     results: list[dict[str, Any]] = []
-    for provider in PROVIDERS:
+    candidates = sorted(PROVIDERS, key=lambda p: p.priority)[:DETECT_MAX_PROVIDERS]
+    for provider in candidates:
         result = await test_provider_key(provider.name, key)
         if result.get("ok") or result.get("status") in (401, 403, 429):
             results.append(result)
