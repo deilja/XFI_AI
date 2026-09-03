@@ -33,6 +33,8 @@ if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
   [[ -n "$TELEGRAM_ADMIN_IDS" ]] || fail "Для Telegram-бота нужен XFI_AI_TELEGRAM_ADMIN_IDS."
   [[ "$TELEGRAM_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Некорректный список Telegram admin IDs."
 fi
+TELEGRAM_BOT_ENABLED=0
+[[ -n "$TELEGRAM_BOT_TOKEN" ]] && TELEGRAM_BOT_ENABLED=1
 
 say "AI-провайдеры"
 echo "Пустой ключ отключает провайдера."
@@ -109,7 +111,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload; systemctl enable --now "$SERVICE"; sleep 2; systemctl is-active --quiet "$SERVICE" || { journalctl -u "$SERVICE" -n 50 --no-pager; fail "XFI AI не запустился."; }
 
-if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
+if [[ "$TELEGRAM_BOT_ENABLED" == "1" ]]; then
   cat > /etc/systemd/system/$BOT_SERVICE.service <<EOF
 [Unit]
 Description=XFI AI Telegram Token Bot
@@ -163,5 +165,4 @@ ln -sfn /etc/nginx/sites-available/xfi-ai.conf /etc/nginx/sites-enabled/xfi-ai.c
 
 say "DNS и HTTPS"; DOMAIN_IP="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"; echo "DNS: ${DOMAIN_IP:-не найден} | VPS: ${PUBLIC_IP:-не определён}"
 if [[ -n "$PUBLIC_IP" && "$DOMAIN_IP" == "$PUBLIC_IP" ]]; then certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" --redirect || echo "Certbot не получил сертификат."; else echo "Сначала направьте A-запись $DOMAIN на $PUBLIC_IP, затем: certbot --nginx -d $DOMAIN --redirect"; fi
-say "Проверка"; curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health"; echo; echo "Установка завершена: https://$DOMAIN/"; echo "API: https://$DOMAIN/v1/chat/completions"; echo "Порт: 127.0.0.1:$PORT"; echo "Админ-ключ: $ADMIN_KEY"; echo "Секреты: $ENV_FILE"
-[[ -n "$TELEGRAM_BOT_TOKEN" ]] && echo "Telegram token bot: $BOT_SERVICE"
+say "Проверка"; curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health"; echo; echo "Установка завершена: https://$DOMAIN/"; echo "API: https://$DOMAIN/v1/chat/completions"; echo "Порт: 127.0.0.1:$PORT"; echo "Админ-ключ: $ADMIN_KEY"; echo "Секреты: $ENV_FILE"; [[ "$TELEGRAM_BOT_ENABLED" == "1" ]] && echo "Telegram token bot: $BOT_SERVICE"
