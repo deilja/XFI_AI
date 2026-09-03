@@ -6,7 +6,7 @@ CONFIG="$OPENCLAW_HOME/openclaw.json"
 ENV="$OPENCLAW_HOME/.env"
 WORKSPACE="$OPENCLAW_HOME/workspace"
 
-[[ $EUID -ne 0 ]] || echo "OpenClaw лучше устанавливать от пользователю-оператору, не root."
+[[ $EUID -ne 0 ]] || echo "OpenClaw лучше устанавливать от имени пользователя-оператора, не root."
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 command -v openclaw >/dev/null 2>&1 || {
