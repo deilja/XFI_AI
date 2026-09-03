@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -76,10 +77,8 @@ async def _repo_tree() -> dict[str, str]:
     return files
 
 
-async def _file(path: str) -> str:
-    data = await _github_get(f"/repos/{_repo()}/contents/{path}")
-    import base64
-
+async def _file(path: str, ref: str = "HEAD") -> str:
+    data = await _github_get(f"/repos/{_repo()}/contents/{path}?ref={ref}")
     raw = base64.b64decode(data["content"].replace("\n", ""))
     if len(raw) > MAX_FILE_BYTES:
         raise RuntimeError(f"File too large: {path}")
@@ -96,7 +95,7 @@ async def _ask_model(messages: list[dict[str, str]]) -> str:
 def _json(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\\s*|\\s*```$", "", text, flags=re.I | re.S)
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S)
     data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("Agent response is not an object")
@@ -128,19 +127,22 @@ async def generate_edits(request: str, answers: list[dict[str, str]]) -> dict[st
     contents = []
     for path in files:
         contents.append(f"===== {path} =====\n{await _file(path)}")
-    prompt = f"Запрос пользователя: {request}\nУточнения: {json.dumps(answers, ensure_ascii=False)}\nПлан: {analysis.summary}\nКонтекст:\n{'\n'.join(contents)}"
+    context = "\n".join(contents)
+    prompt = f"Запрос пользователя: {request}\nУточнения: {json.dumps(answers, ensure_ascii=False)}\nПлан: {analysis.summary}\nКонтекст:\n{context}"
     data = _json(await _ask_model([{"role": "system", "content": PATCH_PROMPT}, {"role": "user", "content": prompt}]))
     edits = data.get("edits", [])
     if not isinstance(edits, list) or len(edits) > MAX_FILES:
         raise ValueError("Invalid edit set")
     safe = []
     for edit in edits:
+        if not isinstance(edit, dict):
+            raise ValueError("Invalid edit entry")
         path = str(edit.get("path", ""))
         content = edit.get("content")
         if path not in files or not isinstance(content, str) or len(content.encode()) > MAX_FILE_BYTES:
             raise ValueError(f"Unsafe or invalid edit: {path}")
         safe.append({"path": path, "content": content, "reason": str(edit.get("reason", ""))[:500]})
-    return {"summary": str(data.get("summary", analysis.summary)), "edits": safe, "tests": data.get("tests", [])[:10]}
+    return {"summary": str(data.get("summary", analysis.summary))[:3000], "edits": safe, "tests": data.get("tests", [])[:10]}
 
 
 async def create_branch_and_commit(edits: list[dict[str, str]], message: str) -> tuple[str, str]:
@@ -153,7 +155,6 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
         sha = ref.json()["object"]["sha"]
         create = await client.post(f"https://api.github.com/repos/{repo}/git/refs", headers=headers, json={"ref": f"refs/heads/{branch}", "sha": sha})
         create.raise_for_status()
-        import base64
         for edit in edits:
             current = await client.get(f"https://api.github.com/repos/{repo}/contents/{edit['path']}", headers=headers, params={"ref": branch})
             current.raise_for_status()
