@@ -1,10 +1,9 @@
 import pytest
+from app import providers
 
 
 @pytest.mark.asyncio
 async def test_detect_provider_key_limits_candidates(monkeypatch):
-    import app.providers as providers
-
     calls = []
 
     async def fake_test(provider_name, key):
@@ -23,8 +22,6 @@ async def test_detect_provider_key_limits_candidates(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_detect_provider_key_rejects_oversized_key(monkeypatch):
-    import app.providers as providers
-
     async def fail_if_called(*args):
         raise AssertionError("provider check must not run")
 
