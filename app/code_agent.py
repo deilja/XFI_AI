@@ -53,12 +53,22 @@ def _headers() -> dict[str, str]:
     token = _token()
     if not token:
         raise RuntimeError("XFI_AI_GITHUB_TOKEN is not configured")
-    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
 
 def _safe_path(path: str) -> bool:
     p = path.strip().replace("\\", "/")
-    return bool(p) and not p.startswith("/") and ".." not in p.split("/") and not any(x in p.lower() for x in (".env", "secret", "credential", "private_key", "id_rsa"))
+    blocked = (".env", "secret", "credential", "private_key", "id_rsa")
+    return (
+        bool(p)
+        and not p.startswith("/")
+        and ".." not in p.split("/")
+        and not any(x in p.lower() for x in blocked)
+    )
 
 
 async def _github_get(path: str) -> Any:
@@ -95,10 +105,15 @@ async def _ask_model(messages: list[dict[str, str]]) -> str:
 def _json(text: str) -> dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S)
+        text = re.sub(
+            r"^```(?:json)?\s*|\s*```$",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
     data = json.loads(text)
     if not isinstance(data, dict):
-        raise ValueError("Agent response is not an object")
+        raise TypeError("Agent response is not an object")
     return data
 
 
@@ -107,13 +122,24 @@ async def analyze_request(request: str, history: list[dict[str, str]] | None = N
         raise ValueError("Request is empty or too large")
     tree = await _repo_tree()
     context = "\n".join(sorted(tree)[:400])
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Репозиторий: {_repo()}\nФайлы:\n{context}\n\nЗапрос:\n{request}"}]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": f"Репозиторий: {_repo()}\nФайлы:\n{context}\n\nЗапрос:\n{request}",
+        },
+    ]
     if history:
         messages.extend(history[-6:])
     data = _json(await _ask_model(messages))
     questions = [str(x) for x in data.get("questions", [])][:3]
     files = [str(x) for x in data.get("files", []) if _safe_path(str(x))][:MAX_FILES]
-    return AgentResult(bool(data.get("ready")), questions, str(data.get("summary", ""))[:3000], files)
+    return AgentResult(
+        bool(data.get("ready")),
+        questions,
+        str(data.get("summary", ""))[:3000],
+        files,
+    )
 
 
 async def generate_edits(request: str, answers: list[dict[str, str]]) -> dict[str, Any]:
@@ -128,21 +154,39 @@ async def generate_edits(request: str, answers: list[dict[str, str]]) -> dict[st
     for path in files:
         contents.append(f"===== {path} =====\n{await _file(path)}")
     context = "\n".join(contents)
-    prompt = f"Запрос пользователя: {request}\nУточнения: {json.dumps(answers, ensure_ascii=False)}\nПлан: {analysis.summary}\nКонтекст:\n{context}"
-    data = _json(await _ask_model([{"role": "system", "content": PATCH_PROMPT}, {"role": "user", "content": prompt}]))
+    prompt = (
+        f"Запрос пользователя: {request}\n"
+        f"Уточнения: {json.dumps(answers, ensure_ascii=False)}\n"
+        f"План: {analysis.summary}\nКонтекст:\n{context}"
+    )
+    data = _json(
+        await _ask_model(
+            [{"role": "system", "content": PATCH_PROMPT}, {"role": "user", "content": prompt}]
+        )
+    )
     edits = data.get("edits", [])
     if not isinstance(edits, list) or len(edits) > MAX_FILES:
         raise ValueError("Invalid edit set")
     safe = []
     for edit in edits:
         if not isinstance(edit, dict):
-            raise ValueError("Invalid edit entry")
+            raise TypeError("Invalid edit entry")
         path = str(edit.get("path", ""))
         content = edit.get("content")
         if path not in files or not isinstance(content, str) or len(content.encode()) > MAX_FILE_BYTES:
             raise ValueError(f"Unsafe or invalid edit: {path}")
-        safe.append({"path": path, "content": content, "reason": str(edit.get("reason", ""))[:500]})
-    return {"summary": str(data.get("summary", analysis.summary))[:3000], "edits": safe, "tests": data.get("tests", [])[:10]}
+        safe.append(
+            {
+                "path": path,
+                "content": content,
+                "reason": str(edit.get("reason", ""))[:500],
+            }
+        )
+    return {
+        "summary": str(data.get("summary", analysis.summary))[:3000],
+        "edits": safe,
+        "tests": data.get("tests", [])[:10],
+    }
 
 
 async def create_branch_and_commit(edits: list[dict[str, str]], message: str) -> tuple[str, str]:
@@ -150,15 +194,35 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
     headers = _headers()
     branch = f"xfi-ai/{int(time.time())}"
     async with httpx.AsyncClient(timeout=30) as client:
-        ref = await client.get(f"https://api.github.com/repos/{repo}/git/ref/heads/main", headers=headers)
+        ref = await client.get(
+            f"https://api.github.com/repos/{repo}/git/ref/heads/main",
+            headers=headers,
+        )
         ref.raise_for_status()
         sha = ref.json()["object"]["sha"]
-        create = await client.post(f"https://api.github.com/repos/{repo}/git/refs", headers=headers, json={"ref": f"refs/heads/{branch}", "sha": sha})
+        create = await client.post(
+            f"https://api.github.com/repos/{repo}/git/refs",
+            headers=headers,
+            json={"ref": f"refs/heads/{branch}", "sha": sha},
+        )
         create.raise_for_status()
         for edit in edits:
-            current = await client.get(f"https://api.github.com/repos/{repo}/contents/{edit['path']}", headers=headers, params={"ref": branch})
+            current = await client.get(
+                f"https://api.github.com/repos/{repo}/contents/{edit['path']}",
+                headers=headers,
+                params={"ref": branch},
+            )
             current.raise_for_status()
-            payload = {"message": message[:120], "content": base64.b64encode(edit["content"].encode()).decode(), "sha": current.json()["sha"], "branch": branch}
-            updated = await client.put(f"https://api.github.com/repos/{repo}/contents/{edit['path']}", headers=headers, json=payload)
+            payload = {
+                "message": message[:120],
+                "content": base64.b64encode(edit["content"].encode()).decode(),
+                "sha": current.json()["sha"],
+                "branch": branch,
+            }
+            updated = await client.put(
+                f"https://api.github.com/repos/{repo}/contents/{edit['path']}",
+                headers=headers,
+                json=payload,
+            )
             updated.raise_for_status()
     return branch, f"https://github.com/{repo}/tree/{branch}"
