@@ -1,8 +1,10 @@
 """Telegram bot for XFI AI tokens and guarded XFI_CONNECT code changes."""
 
 import asyncio
+import json
 import os
 
+import httpx
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 
@@ -94,7 +96,7 @@ async def _process_request(message: types.Message) -> None:
         await message.answer("Анализирую запрос и структуру XFI_CONNECT…")
         try:
             result = await analyze_request(session["request"], session["answers"])
-        except Exception:
+        except (RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError, httpx.HTTPError):
             await message.answer("Не удалось проанализировать задачу. Проверьте доступ XFI AI к GitHub и попробуйте снова.")
             return
         if not result.ready:
@@ -120,7 +122,7 @@ async def _generate_and_show(message: types.Message) -> None:
         await message.answer("Требования понятны. Формирую минимальный набор изменений…")
         try:
             patch = await generate_edits(session["request"], session["answers"])
-        except Exception:
+        except (RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError, httpx.HTTPError):
             await message.answer("Не удалось безопасно сформировать изменения. Задачу не применял.")
             return
         session["patch"] = patch
@@ -161,7 +163,7 @@ async def conversational_code(message: types.Message) -> None:
             await message.answer("Подтверждение получено. Создаю отдельную ветку и записываю изменения…")
             try:
                 branch, url = await create_branch_and_commit(patch["edits"], f"feat: {patch['summary'][:80]}")
-            except Exception:
+            except (RuntimeError, ValueError, TypeError, KeyError, httpx.HTTPError):
                 await message.answer("Не удалось записать изменения в GitHub. Изменения не применены к main.")
                 return
             _sessions.pop(user_id, None)
