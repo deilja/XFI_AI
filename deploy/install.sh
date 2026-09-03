@@ -8,20 +8,12 @@ say(){ printf '\n==> %s\n' "$*"; }; fail(){ echo "[ERROR] $*" >&2; exit 1; }
 valid_domain(){ [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" != *..* ]]; }
 port_free(){ ! ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])$1$"; }
 find_port(){ local p; for p in $(seq "$DEFAULT_PORT" 8199); do port_free "$p" && { echo "$p"; return; }; done; fail "Нет свободного порта 8091-8199."; }
-validate_provider_order(){
-  local item
-  [[ -n "$1" ]] || return 1
-  IFS=',' read -ra items <<< "$1"
-  for item in "${items[@]}"; do
-    [[ "$item" =~ ^(groq|gemini|openrouter|mistral|sambanova|cerebras|huggingface|cohere)$ ]] || return 1
-  done
-}
+validate_provider_order(){ local item; [[ -n "$1" ]] || return 1; IFS=',' read -ra items <<< "$1"; for item in "${items[@]}"; do [[ "$item" =~ ^(groq|gemini|openrouter|mistral|sambanova|cerebras|huggingface|cohere)$ ]] || return 1; done; }
 
 say "XFI AI Gateway — Multi-AI установка"
 [[ -r /etc/os-release ]] && . /etc/os-release || true
 read -rp "Домен для XFI AI: " DOMAIN; DOMAIN="${DOMAIN,,}"; valid_domain "$DOMAIN" || fail "Некорректный домен."
-PUBLIC_IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-echo "VPS IPv4: ${PUBLIC_IP:-не определён}"
+PUBLIC_IP="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"; echo "VPS IPv4: ${PUBLIC_IP:-не определён}"
 SUGGESTED_PORT="$(find_port)"; echo "Предложенный свободный локальный порт: $SUGGESTED_PORT"
 read -rp "Порт XFI AI [Enter = $SUGGESTED_PORT]: " PORT; PORT="${PORT:-$SUGGESTED_PORT}"
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1024 && "$PORT" -le 65535 ]] || fail "Порт должен быть 1024-65535."; port_free "$PORT" || fail "Порт занят."
@@ -33,8 +25,11 @@ if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
   [[ -n "$TELEGRAM_ADMIN_IDS" ]] || fail "Для Telegram-бота нужен XFI_AI_TELEGRAM_ADMIN_IDS."
   [[ "$TELEGRAM_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Некорректный список Telegram admin IDs."
 fi
-TELEGRAM_BOT_ENABLED=0
-[[ -n "$TELEGRAM_BOT_TOKEN" ]] && TELEGRAM_BOT_ENABLED=1
+TELEGRAM_BOT_ENABLED=0; [[ -n "$TELEGRAM_BOT_TOKEN" ]] && TELEGRAM_BOT_ENABLED=1
+read -rp "GitHub репозиторий для автоправок [deilja/XFI_CONNECT]: " CODE_REPO; CODE_REPO="${CODE_REPO:-deilja/XFI_CONNECT}"
+[[ "$CODE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "Некорректный GitHub repository."
+read -rsp "GitHub token для XFI AI code-agent [Enter = отключить автоправки]: " GITHUB_TOKEN; echo
+CODE_AGENT_ENABLED=0; [[ -n "$GITHUB_TOKEN" ]] && CODE_AGENT_ENABLED=1
 
 say "AI-провайдеры"
 echo "Пустой ключ отключает провайдера."
@@ -48,8 +43,7 @@ read -rsp "Hugging Face token: " HF_KEY; echo
 read -rsp "Cohere API key: " COHERE_KEY; echo
 [[ -n "$GROQ_KEY$GEMINI_KEY$OPENROUTER_KEY$MISTRAL_KEY$SAMBANOVA_KEY$CEREBRAS_KEY$HF_KEY$COHERE_KEY" ]] || fail "Нужен хотя бы один AI provider."
 PROVIDERS=""; addp(){ [[ -n "$2" ]] && PROVIDERS="${PROVIDERS:+$PROVIDERS,}$1"; }; addp groq "$GROQ_KEY"; addp gemini "$GEMINI_KEY"; addp openrouter "$OPENROUTER_KEY"; addp mistral "$MISTRAL_KEY"; addp sambanova "$SAMBANOVA_KEY"; addp cerebras "$CEREBRAS_KEY"; addp huggingface "$HF_KEY"; addp cohere "$COHERE_KEY"
-echo "Порядок failover: $PROVIDERS"; read -rp "Изменить порядок? [Enter = оставить]: " CUSTOM; PROVIDERS="${CUSTOM:-$PROVIDERS}"
-validate_provider_order "$PROVIDERS" || fail "Некорректный порядок провайдеров."
+echo "Порядок failover: $PROVIDERS"; read -rp "Изменить порядок? [Enter = оставить]: " CUSTOM; PROVIDERS="${CUSTOM:-$PROVIDERS}"; validate_provider_order "$PROVIDERS" || fail "Некорректный порядок провайдеров."
 read -rsp "Админ-ключ [Enter = сгенерировать]: " ADMIN_KEY; echo; ADMIN_KEY="${ADMIN_KEY:-$(openssl rand -hex 32)}"; [[ ${#ADMIN_KEY} -ge 24 ]] || fail "Админ-ключ слишком короткий."
 PEPPER="$(openssl rand -hex 32)"
 
@@ -84,8 +78,10 @@ XFI_AI_TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 XFI_AI_TELEGRAM_ADMIN_IDS=$TELEGRAM_ADMIN_IDS
 XFI_AI_BOT_TOKEN_RPM=60
 XFI_AI_BOT_TOKEN_DAILY=5000
+XFI_AI_CODE_REPO=$CODE_REPO
+XFI_AI_GITHUB_TOKEN=$GITHUB_TOKEN
 EOF
-unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY MISTRAL_KEY SAMBANOVA_KEY CEREBRAS_KEY HF_KEY COHERE_KEY TELEGRAM_BOT_TOKEN; chmod 600 "$ENV_FILE"; chown root:xfi-ai "$ENV_FILE"
+unset GROQ_KEY GEMINI_KEY OPENROUTER_KEY MISTRAL_KEY SAMBANOVA_KEY CEREBRAS_KEY HF_KEY COHERE_KEY TELEGRAM_BOT_TOKEN GITHUB_TOKEN; chmod 600 "$ENV_FILE"; chown root:xfi-ai "$ENV_FILE"
 
 say "Systemd"; cat > /etc/systemd/system/$SERVICE.service <<EOF
 [Unit]
@@ -114,7 +110,7 @@ systemctl daemon-reload; systemctl enable --now "$SERVICE"; sleep 2; systemctl i
 if [[ "$TELEGRAM_BOT_ENABLED" == "1" ]]; then
   cat > /etc/systemd/system/$BOT_SERVICE.service <<EOF
 [Unit]
-Description=XFI AI Telegram Token Bot
+Description=XFI AI Telegram Token and Code Agent Bot
 After=network-online.target $SERVICE.service
 Requires=$SERVICE.service
 Wants=network-online.target
@@ -165,4 +161,4 @@ ln -sfn /etc/nginx/sites-available/xfi-ai.conf /etc/nginx/sites-enabled/xfi-ai.c
 
 say "DNS и HTTPS"; DOMAIN_IP="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1{print $1}')"; echo "DNS: ${DOMAIN_IP:-не найден} | VPS: ${PUBLIC_IP:-не определён}"
 if [[ -n "$PUBLIC_IP" && "$DOMAIN_IP" == "$PUBLIC_IP" ]]; then certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" --redirect || echo "Certbot не получил сертификат."; else echo "Сначала направьте A-запись $DOMAIN на $PUBLIC_IP, затем: certbot --nginx -d $DOMAIN --redirect"; fi
-say "Проверка"; curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health"; echo; echo "Установка завершена: https://$DOMAIN/"; echo "API: https://$DOMAIN/v1/chat/completions"; echo "Порт: 127.0.0.1:$PORT"; echo "Админ-ключ: $ADMIN_KEY"; echo "Секреты: $ENV_FILE"; [[ "$TELEGRAM_BOT_ENABLED" == "1" ]] && echo "Telegram token bot: $BOT_SERVICE"
+say "Проверка"; curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health"; echo; echo "Установка завершена: https://$DOMAIN/"; echo "API: https://$DOMAIN/v1/chat/completions"; echo "Порт: 127.0.0.1:$PORT"; echo "Админ-ключ: $ADMIN_KEY"; echo "Секреты: $ENV_FILE"; [[ "$TELEGRAM_BOT_ENABLED" == "1" ]] && echo "Telegram bot: $BOT_SERVICE"; [[ "$CODE_AGENT_ENABLED" == "1" ]] && echo "Code-agent: $CODE_REPO (GitHub branch + commit after confirmation)"
