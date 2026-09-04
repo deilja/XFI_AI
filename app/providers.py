@@ -42,6 +42,7 @@ PROVIDERS = [
     Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 9),
 ]
 
+CAPABILITIES = {"ai", "support", "vpn", "code-agent", "diagnostics", "3x-ui", "phobos", "web-admin"}
 DETECT_MAX_PROVIDERS = len(PROVIDERS)
 DETECT_CONCURRENCY = 4
 _state: dict[str, dict[str, float]] = {}
@@ -57,9 +58,19 @@ def configured_providers() -> list[Provider]:
     return [by_name[x] for x in requested if x in by_name and by_name[x].key]
 
 
+def _capability_order(capability: str) -> list[str]:
+    if capability not in CAPABILITIES:
+        return []
+    raw = os.getenv(f"XFI_AI_{capability.upper().replace('-', '_')}_PROVIDERS", "")
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
+def _routing_score(p: Provider, preferred: list[str]) -> tuple[int, float]:
+    position = preferred.index(p.name) if p.name in preferred else len(preferred)
+    return position, _score(p)
+
+
 def _score(p: Provider) -> float:
-    # Read persisted state on every routing decision so multiple gateway workers
-    # see failures/cooldowns recorded by another worker without stale process cache.
     persisted = provider_state(p.name)
     s = persisted if persisted else _state.get(p.name, {})
     _state[p.name] = s
@@ -116,32 +127,17 @@ async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
             )
         latency_ms = round((time.monotonic() - started) * 1000, 1)
         ok = response.status_code < 400
-        result = {
-            "ok": ok,
-            "provider": provider.name,
-            "model": provider.model,
-            "status": response.status_code,
-            "latency_ms": latency_ms,
-            "fingerprint": _key_fingerprint(key),
-        }
+        result = {"ok": ok, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
         if not ok:
             result["error"] = "Provider rejected the key or request"
         return result
     except httpx.HTTPError as exc:
-        return {
-            "ok": False,
-            "provider": provider.name,
-            "model": provider.model,
-            "latency_ms": round((time.monotonic() - started) * 1000, 1),
-            "fingerprint": _key_fingerprint(key),
-            "error": type(exc).__name__,
-        }
+        return {"ok": False, "provider": provider.name, "model": provider.model, "latency_ms": round((time.monotonic() - started) * 1000, 1), "fingerprint": _key_fingerprint(key), "error": type(exc).__name__}
 
 
 async def detect_provider_key(key: str) -> list[dict[str, Any]]:
     if not key or len(key) > 1000:
         return []
-
     semaphore = asyncio.Semaphore(DETECT_CONCURRENCY)
 
     async def check(provider: Provider) -> dict[str, Any]:
@@ -150,11 +146,7 @@ async def detect_provider_key(key: str) -> list[dict[str, Any]]:
 
     candidates = sorted(PROVIDERS, key=lambda p: p.priority)[:DETECT_MAX_PROVIDERS]
     results = await asyncio.gather(*(check(provider) for provider in candidates))
-    return [
-        result
-        for result in results
-        if result.get("ok") or result.get("status") in (401, 403, 429)
-    ]
+    return [result for result in results if result.get("ok") or result.get("status") in (401, 403, 429)]
 
 
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
@@ -164,9 +156,15 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
         raise ValueError("Invalid JSON request body") from exc
     if not isinstance(payload, dict):
         raise TypeError("JSON request body must be an object")
-    providers = sorted(configured_providers(), key=_score)
+
+    capability = str(payload.pop("xfi_capability", "ai")).strip().lower()
+    if capability not in CAPABILITIES:
+        raise ValueError("Unsupported XFI capability")
+    preferred = _capability_order(capability)
+    providers = sorted(configured_providers(), key=lambda p: _routing_score(p, preferred))
     if not providers:
         raise RuntimeError("No AI providers are configured")
+
     last_error: Exception | None = None
     last_response: httpx.Response | None = None
     last_provider: str | None = None
