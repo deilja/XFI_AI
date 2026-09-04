@@ -9,11 +9,12 @@ DB_PATH = Path(os.getenv("XFI_AI_DB", "/var/lib/xfi-ai/keys.db"))
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 AUTH_TYPES = {"key", "agent"}
 _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$")
+_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,99}$")
 
 
 def _db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("""CREATE TABLE IF NOT EXISTS vps (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -43,11 +44,18 @@ def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_t
         raise ValueError("auth_type must be key or agent; password authentication is disabled")
     host = host.strip()
     username = username.strip()
+    name = name.strip()
     if not host or not _HOST_RE.fullmatch(host):
         raise ValueError("invalid VPS host")
-    if not username or len(username) > 100 or any(c.isspace() for c in username) or username.startswith("-"):
+    if not name or len(name) > 100:
+        raise ValueError("invalid VPS name")
+    if not _USER_RE.fullmatch(username):
         raise ValueError("invalid SSH username")
-    if not (1 <= int(port) <= 65535):
+    try:
+        port = int(port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid SSH port") from exc
+    if not (1 <= port <= 65535):
         raise ValueError("invalid SSH port")
     if auth_type == "key":
         key_path = Path(auth_value).expanduser()
@@ -58,12 +66,16 @@ def add_vps(name: str, host: str, port: int = 22, username: str = "root", auth_t
         stored = str(key_path)
     else:
         stored = ""
-    with _db() as conn:
-        cur = conn.execute(
-            "INSERT INTO vps(name,host,port,username,auth_type,auth_value) VALUES(?,?,?,?,?,?)",
-            (name[:100], host, int(port), username, auth_type, stored),
-        )
-        vid = cur.lastrowid
+    try:
+        with _db() as conn:
+            cur = conn.execute(
+                "INSERT INTO vps(name,host,port,username,auth_type,auth_value) VALUES(?,?,?,?,?,?)",
+                (name, host, port, username, auth_type, stored),
+            )
+            vid = cur.lastrowid
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("VPS host already exists") from exc
+    _audit("add_vps", host, "ok")
     return vid
 
 
@@ -75,9 +87,13 @@ def list_vps():
 
 
 def delete_vps(vps_id: int):
+    row = _get_vps(vps_id)
     with _db() as conn:
-        conn.execute("DELETE FROM vps WHERE id=?", (vps_id,))
+        cur = conn.execute("DELETE FROM vps WHERE id=?", (vps_id,))
+        if cur.rowcount != 1:
+            raise KeyError("VPS not found")
         conn.commit()
+    _audit("delete_vps", row[2], "ok")
 
 
 def _get_vps(vps_id: int):
@@ -90,14 +106,24 @@ def _get_vps(vps_id: int):
 
 def _ssh_base(row):
     _, _, host, port, username, auth_type, auth_value = row
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-p", str(port)]
+    args = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=8",
+        "-o", "ConnectionAttempts=1",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "PasswordAuthentication=no",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-p", str(port),
+    ]
     if auth_type == "key":
         if not auth_value:
             raise ValueError("SSH key path is missing")
         key = Path(auth_value).expanduser()
         if not key.is_absolute() or not key.is_file():
-            raise FileNotFoundError(f"SSH key not found: {key}")
-        args += ["-i", str(key)]
+            raise ValueError("Configured SSH key is unavailable")
+        args += ["-o", "IdentitiesOnly=yes", "-i", str(key)]
     elif auth_type != "agent":
         raise ValueError("unsupported SSH authentication type")
     args.append(f"{username}@{host}")
