@@ -12,6 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .providers import complete
 
@@ -21,12 +22,11 @@ MAX_REQUEST_CHARS = 8_000
 MAX_HISTORY = 12
 MAX_CONTEXT_FILES = 500
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', '.cache', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'dist', 'build', '.next', '.turbo', 'coverage'}
-
 PROJECTS = {
     "connect": {"name": "XFI_CONNECT", "path_env": "XFI_CONNECT_PATH", "default_path": "/root/XFI_CONNECT", "service_env": "XFI_CONNECT_SERVICE", "default_service": "xfi-connect", "kind": "python", "health_env": "XFI_CONNECT_HEALTH_URL", "default_health": ""},
     "webapp": {"name": "XFI_3XUI_WebApp", "path_env": "XFI_3XUI_WEBAPP_PATH", "default_path": "/opt/xfi-3xui-webapp", "service_env": "XFI_3XUI_WEBAPP_SERVICE", "default_service": "xfi-3xui-webapp", "kind": "bun", "health_env": "XFI_3XUI_WEBAPP_HEALTH_URL", "default_health": "http://127.0.0.1:3000/health"},
 }
-
+ALLOWED_SERVICES = {cfg["default_service"] for cfg in PROJECTS.values()}
 BLOCKED = (".env", "secret", "credential", "private_key", "id_rsa", ".pem", ".key")
 SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты работаешь только с выбранным установленным проектом XFI. Не придумывай файлы/API и не смешивай проекты. Не читай и не меняй секреты. Для анализа верни только JSON: {\"ready\":true/false,\"questions\":[...],\"summary\":\"...\",\"files\":[\"path\"]}. Если данных недостаточно, ready=false и максимум 3 конкретных вопроса."""
 PATCH_PROMPT = """Сформируй минимальные изменения только для выбранного установленного проекта. Верни только JSON: {\"summary\":\"...\",\"edits\":[{\"path\":\"...\",\"content\":\"полное новое содержимое\",\"reason\":\"...\"}],\"tests\":[\"...\"]}. Только существующие безопасные файлы из контекста. Не трогай .env, secrets, credentials, private keys, сертификаты. Максимум 8 файлов. Не меняй другой проект."""
@@ -39,7 +39,13 @@ def project_config(project: str) -> dict[str, str]:
     cfg = PROJECTS[key].copy()
     cfg["path"] = str(Path(os.getenv(cfg["path_env"], cfg["default_path"])).resolve())
     cfg["service"] = os.getenv(cfg["service_env"], cfg["default_service"]).strip() or cfg["default_service"]
+    if cfg["service"] not in ALLOWED_SERVICES:
+        raise ValueError(f"Service is not allowed for {cfg['name']}")
     cfg["health"] = os.getenv(cfg["health_env"], cfg["default_health"]).strip()
+    if cfg["health"]:
+        parsed = urlparse(cfg["health"])
+        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Health URL must point to localhost")
     return cfg
 
 
@@ -203,6 +209,7 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
         backup_dir = backup_root / timestamp
         backup_dir.mkdir(parents=True, exist_ok=False)
         changed: list[str] = []
+        tmp_paths: list[Path] = []
         try:
             for edit in edits:
                 target = resolve(cfg, edit["path"])
@@ -215,8 +222,10 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, backup)
                 tmp = target.with_name(f".{target.name}.xfi-ai-{secrets.token_hex(4)}.tmp")
+                tmp_paths.append(tmp)
                 tmp.write_text(edit["content"], encoding="utf-8")
                 os.replace(tmp, target)
+                tmp_paths.remove(tmp)
                 changed.append(edit["path"])
             _validate(cfg, changed)
             if restart:
@@ -229,6 +238,11 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
                 _health(cfg)
             return {"ok": True, "project": project, "name": cfg["name"], "backup": str(backup_dir), "changed": changed, "service": cfg["service"]}
         except Exception:
+            for tmp in tmp_paths:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
             for path in reversed(changed):
                 backup = backup_dir / path
                 if backup.exists():
