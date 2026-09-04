@@ -10,6 +10,7 @@ import base64
 import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -21,13 +22,20 @@ class PhobosConfig:
     password: str
     timeout: float = 10.0
 
+    def __post_init__(self) -> None:
+        parsed = urlparse(self.base_url.rstrip("/"))
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Phobos base_url must use http:// or https:// with a host")
+        if parsed.username or parsed.password:
+            raise ValueError("Phobos base_url must not contain credentials")
+        if self.timeout <= 0 or self.timeout > 120:
+            raise ValueError("Phobos timeout must be between 0 and 120 seconds")
+
 
 def get_config() -> PhobosConfig:
     base = os.getenv("XFI_PHOBOS_URL", "http://127.0.0.1:51831").rstrip("/")
     username = os.getenv("XFI_PHOBOS_USERNAME", "").strip()
     password = os.getenv("XFI_PHOBOS_PASSWORD", "")
-    if not base.startswith(("http://", "https://")):
-        raise ValueError("XFI_PHOBOS_URL must use http:// or https://")
     if not username or not password:
         raise RuntimeError("XFI_PHOBOS_USERNAME and XFI_PHOBOS_PASSWORD are not configured")
     return PhobosConfig(base_url=base, username=username, password=password)
