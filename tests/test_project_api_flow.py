@@ -1,6 +1,6 @@
 import pytest
-from starlette.requests import Request
 from fastapi import HTTPException
+from starlette.requests import Request
 
 import app.project_api as project_api
 
@@ -9,6 +9,10 @@ def _request(payload: dict) -> Request:
     import json
 
     body = json.dumps(payload).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
     return Request(
         {
             "type": "http",
@@ -19,7 +23,7 @@ def _request(payload: dict) -> Request:
             "server": ("testserver", 443),
             "scheme": "https",
         },
-        receive=lambda: {"type": "http.request", "body": body, "more_body": False},
+        receive=receive,
     )
 
 
@@ -43,8 +47,15 @@ async def test_analyze_to_generate_contract(monkeypatch):
         "edits": [{"path": "app.py", "content": "print('x')", "reason": "requested", "expected_sha256": "abc"}],
         "tests": ["python -m py_compile app.py"],
     }
-    monkeypatch.setattr(project_api, "analyze", lambda *args, **kwargs: analysis)
-    monkeypatch.setattr(project_api, "generate_edits", lambda *args, **kwargs: patch)
+
+    async def fake_analyze(*args, **kwargs):
+        return analysis
+
+    async def fake_generate(*args, **kwargs):
+        return patch
+
+    monkeypatch.setattr(project_api, "analyze", fake_analyze)
+    monkeypatch.setattr(project_api, "generate_edits", fake_generate)
 
     analyzed = await project_api.project_analyze("connect", _request({"request": "change text"}), None, None)
     generated = await project_api.project_generate("connect", _request({"request": "change text", "answers": []}), None, None)
@@ -61,14 +72,19 @@ async def test_customize_without_confirm_is_preview_only(monkeypatch):
     patch = {"summary": "preview", "edits": [{"path": "app.py", "reason": "test", "content": "x", "expected_sha256": "sha"}], "tests": []}
     applied = False
 
-    monkeypatch.setattr(project_api, "analyze", lambda *args, **kwargs: analysis)
-    monkeypatch.setattr(project_api, "generate_edits", lambda *args, **kwargs: patch)
+    async def fake_analyze(*args, **kwargs):
+        return analysis
+
+    async def fake_generate(*args, **kwargs):
+        return patch
 
     async def fail_apply(*args, **kwargs):
         nonlocal applied
         applied = True
         raise AssertionError("apply must not run during preview")
 
+    monkeypatch.setattr(project_api, "analyze", fake_analyze)
+    monkeypatch.setattr(project_api, "generate_edits", fake_generate)
     monkeypatch.setattr(project_api, "apply_edits_async", fail_apply)
     result = await project_api.project_customize("connect", _request({"request": "preview", "confirm": False}), None, None)
 
@@ -94,9 +110,18 @@ async def test_customize_confirmed_apply_records_result(monkeypatch):
     patch = {"summary": "apply", "edits": [{"path": "app.py", "reason": "test", "content": "x", "expected_sha256": "sha"}], "tests": []}
     applied = {"ok": True, "project": "connect", "backup": "/backup/test", "changed": ["app.py"], "service": "xfi-connect"}
 
-    monkeypatch.setattr(project_api, "analyze", lambda *args, **kwargs: analysis)
-    monkeypatch.setattr(project_api, "generate_edits", lambda *args, **kwargs: patch)
-    monkeypatch.setattr(project_api, "apply_edits_async", lambda *args, **kwargs: applied)
+    async def fake_analyze(*args, **kwargs):
+        return analysis
+
+    async def fake_generate(*args, **kwargs):
+        return patch
+
+    async def fake_apply(*args, **kwargs):
+        return applied
+
+    monkeypatch.setattr(project_api, "analyze", fake_analyze)
+    monkeypatch.setattr(project_api, "generate_edits", fake_generate)
+    monkeypatch.setattr(project_api, "apply_edits_async", fake_apply)
 
     result = await project_api.project_customize("connect", _request({"request": "apply", "confirm": True, "restart": False}), None, None)
 
