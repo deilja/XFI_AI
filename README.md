@@ -1,7 +1,7 @@
 # XFI AI
 
 <p align="center">
-  <img src="docs/assets/xfi-ai-overview.svg" alt="XFI AI overview" width="100%">
+  <img src="docs/assets/xfi-ai-overview.svg" alt="XFI AI — AI Gateway, automation and infrastructure control" width="100%">
 </p>
 
 <p align="center">
@@ -15,6 +15,8 @@
   <img src="https://img.shields.io/badge/Security-Bandit%20%2B%20Audit-111827" alt="Security">
   <img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white" alt="CI">
 </p>
+
+> **XFI_AI** — единая точка для AI-запросов, автоматизации, управления VPS и безопасной разработки XFI CONNECT.
 
 ## Что делает XFI AI
 
@@ -31,10 +33,10 @@
 ## Архитектура
 
 <p align="center">
-  <img src="docs/assets/xfi-ai-architecture.svg" alt="XFI AI architecture" width="100%">
+  <img src="docs/assets/xfi-ai-architecture.svg" alt="XFI AI architecture — clients, gateway, providers and VPS control" width="100%">
 </p>
 
-Клиент использует один XFI token. Реальные ключи AI-провайдеров остаются на сервере.
+Архитектура построена вокруг одного XFI token: клиенту не требуется знать ключи конкретных AI-провайдеров, а provider credentials остаются на серверной стороне.
 
 ## Статус
 
