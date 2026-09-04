@@ -8,7 +8,7 @@ import httpx
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 
-from .code_agent import analyze_request, create_branch_and_commit, generate_edits
+from .code_agent import analyze_request, create_branch_and_commit, generate_edits, wait_for_ci
 from .key_store import create_key
 
 router = Router()
@@ -46,7 +46,7 @@ async def help_command(message: types.Message) -> None:
     if not _is_admin(message):
         await message.answer("Доступ запрещён.")
         return
-    await message.answer("/token — выпустить токен\n/code — начать изменение XFI_CONNECT\n/cancel — отменить задачу\n\nПосле /code опишите задачу обычным текстом. Бот задаст уточняющие вопросы, сформирует план и ждёт «ПОДТВЕРЖДАЮ». После подтверждения создаётся ветка и Pull Request; main напрямую не изменяется.")
+    await message.answer("/token — выпустить токен\n/code — начать изменение XFI_CONNECT\n/cancel — отменить задачу\n\nПосле /code опишите задачу обычным текстом. Бот задаст уточняющие вопросы, сформирует план и ждёт «ПОДТВЕРЖДАЮ». После подтверждения создаётся ветка и Pull Request, затем бот ждёт GitHub Checks и сообщает результат; main напрямую не изменяется.")
 
 
 @router.message(Command("token"))
@@ -167,7 +167,20 @@ async def conversational_code(message: types.Message) -> None:
                 await message.answer("Не удалось записать изменения в GitHub или открыть Pull Request. Изменения не применены к main.")
                 return
             _sessions.pop(user_id, None)
-            await message.answer(f"Готово. Ветка: {branch}\n\nPR: {pr_url}\nВетка: {tree_url}\n\nmain напрямую не изменён. CI XFI_CONNECT проверит Pull Request.")
+            await message.answer(f"PR создан.\n\nВетка: {branch}\nPR: {pr_url}\nВетка: {tree_url}\n\nОжидаю GitHub Checks…")
+        try:
+            ci = await wait_for_ci(branch)
+        except (RuntimeError, ValueError, KeyError, httpx.HTTPError) as exc:
+            await message.answer(f"PR создан, но получить результат GitHub Checks не удалось: {type(exc).__name__}.\nСлияние в main не выполнялось.")
+            return
+        checks = "\n".join(f"• {item}" for item in ci.checks)
+        detail = f"\n\n{checks}" if checks else ""
+        if ci.state == "pass":
+            await message.answer(f"CI PASS.\n\n{ci.summary}{detail}\n\nmain напрямую не изменён. PR готов к ручному review/merge.")
+        elif ci.state == "fail":
+            await message.answer(f"CI FAIL.\n\n{ci.summary}{detail}\n\nИсправление нужно подготовить отдельным запросом; main не изменён.")
+        else:
+            await message.answer(f"CI TIMEOUT.\n\n{ci.summary}\n\nPR остаётся открытым. main не изменён.")
         return
     if session["state"] == "ready":
         await message.answer("Ожидаю «ПОДТВЕРЖДАЮ» или /cancel.")
