@@ -66,7 +66,6 @@ private fun XfiAiApp(repository: XfiRepository, store: XfiSecureStore) {
     fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else repository.client(endpoint)
 
     fun expireSession() {
-        repository.run { }
         session = null
         dashboard = null
         projectStatus = null
@@ -120,15 +119,9 @@ private fun XfiAiApp(repository: XfiRepository, store: XfiSecureStore) {
                             val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
                             scope.launch {
-                                val r = withContext(Dispatchers.IO) {
-                                    runCatching { client.customize(project, request) }
-                                        .getOrElse { AiResult(false, it.message ?: "Connection failed") }
-                                }
-                                if (r.raw.contains("\"stage\":\"questions\"")) {
-                                    result = r.copy(ok = false)
-                                } else {
-                                    result = r
-                                }
+                                val outcome = withContext(Dispatchers.IO) { runCatching { client.customize(project, request) } }
+                                outcome.onSuccess { result = it }
+                                    .onFailure { if (it is SessionExpiredException) expireSession() else result = AiResult(false, it.message ?: "Connection failed") }
                                 busy = false
                             }
                         },
@@ -136,11 +129,9 @@ private fun XfiAiApp(repository: XfiRepository, store: XfiSecureStore) {
                             val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
                             scope.launch {
-                                val r = withContext(Dispatchers.IO) {
-                                    runCatching { client.customize(project, request, true) }
-                                        .getOrElse { AiResult(false, it.message ?: "Apply failed") }
-                                }
-                                if (r.raw.contains("401")) expireSession() else result = r
+                                val outcome = withContext(Dispatchers.IO) { runCatching { client.customize(project, request, true) } }
+                                outcome.onSuccess { result = it }
+                                    .onFailure { if (it is SessionExpiredException) expireSession() else result = AiResult(false, it.message ?: "Apply failed") }
                                 busy = false
                                 if (session != null) refresh()
                             }
