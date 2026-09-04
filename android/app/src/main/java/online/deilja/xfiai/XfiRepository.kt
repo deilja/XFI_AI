@@ -13,12 +13,14 @@ class XfiRepository(context: Context) {
         session
     }
 
-    fun session(): String? = store.loadSession()
+    suspend fun session(): String? = withContext(Dispatchers.IO) { store.loadSession() }
 
     suspend fun logout(endpoint: String) = withContext(Dispatchers.IO) {
         store.loadSession()?.let { runCatching { XfiAiClient(endpoint, it).logout() } }
         store.clearSession()
     }
 
-    fun client(endpoint: String): XfiAiClient? = store.loadSession()?.let { XfiAiClient(endpoint, it) }
+    suspend fun client(endpoint: String): XfiAiClient? = withContext(Dispatchers.IO) {
+        store.loadSession()?.let { XfiAiClient(endpoint, it) }
+    }
 }
