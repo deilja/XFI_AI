@@ -10,7 +10,12 @@ HELPER = os.getenv("XFI_AI_PROJECT_HELPER", "/usr/local/libexec/xfi-ai-project-h
 
 
 def enabled() -> bool:
-    return os.getenv("XFI_AI_PROJECT_HELPER_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"} and os.path.isfile(HELPER) and os.access(HELPER, os.X_OK)
+    return (
+        os.getenv("XFI_AI_PROJECT_HELPER_ENABLED", "1").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and os.path.isfile(HELPER)
+        and os.access(HELPER, os.X_OK)
+    )
 
 
 def call(payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
@@ -22,7 +27,15 @@ def call(payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
     action = str(payload.get("action", "")).strip().lower()
     if action not in {"read", "apply", "restart", "health"}:
         raise ValueError("Unsupported helper action")
-    proc = subprocess.run(["sudo", "-n", HELPER], input=json.dumps(payload, ensure_ascii=False), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)  # nosec B603 - fixed sudo/helper argv; no shell
+    proc = subprocess.run(
+        ["sudo", "-n", HELPER],
+        input=json.dumps(payload, ensure_ascii=False),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )  # nosec B603 - fixed sudo/helper argv; no shell
     if proc.returncode != 0:
         detail = proc.stdout.strip() or proc.stderr.strip() or "Project helper failed"
         try:
@@ -35,7 +48,11 @@ def call(payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Project helper returned invalid JSON") from exc
     if not isinstance(result, dict) or not result.get("ok"):
-        raise RuntimeError(str(result.get("error", "Project helper failed")) if isinstance(result, dict) else "Project helper failed")
+        raise RuntimeError(
+            str(result.get("error", "Project helper failed"))
+            if isinstance(result, dict)
+            else "Project helper failed"
+        )
     return result
 
 
