@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -41,12 +42,17 @@ PROVIDERS = [
     Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 9),
 ]
 
-DETECT_MAX_PROVIDERS = 4
+DETECT_MAX_PROVIDERS = len(PROVIDERS)
+DETECT_CONCURRENCY = 4
 _state: dict[str, dict[str, float]] = {}
 
 
 def configured_providers() -> list[Provider]:
-    requested = [x.strip().lower() for x in os.getenv("XFI_AI_PROVIDERS", ",".join(p.name for p in PROVIDERS)).split(",") if x.strip()]
+    requested = [
+        x.strip().lower()
+        for x in os.getenv("XFI_AI_PROVIDERS", ",".join(p.name for p in PROVIDERS)).split(",")
+        if x.strip()
+    ]
     by_name = {p.name: p for p in PROVIDERS}
     return [by_name[x] for x in requested if x in by_name and by_name[x].key]
 
@@ -99,27 +105,52 @@ async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-            response = await client.post(_url(provider), headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, json=payload)
+            response = await client.post(
+                _url(provider),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+            )
         latency_ms = round((time.monotonic() - started) * 1000, 1)
         ok = response.status_code < 400
-        result = {"ok": ok, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
+        result = {
+            "ok": ok,
+            "provider": provider.name,
+            "model": provider.model,
+            "status": response.status_code,
+            "latency_ms": latency_ms,
+            "fingerprint": _key_fingerprint(key),
+        }
         if not ok:
             result["error"] = "Provider rejected the key or request"
         return result
     except httpx.HTTPError as exc:
-        return {"ok": False, "provider": provider.name, "model": provider.model, "latency_ms": round((time.monotonic() - started) * 1000, 1), "fingerprint": _key_fingerprint(key), "error": type(exc).__name__}
+        return {
+            "ok": False,
+            "provider": provider.name,
+            "model": provider.model,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "fingerprint": _key_fingerprint(key),
+            "error": type(exc).__name__,
+        }
 
 
 async def detect_provider_key(key: str) -> list[dict[str, Any]]:
     if not key or len(key) > 1000:
         return []
-    results: list[dict[str, Any]] = []
+
+    semaphore = asyncio.Semaphore(DETECT_CONCURRENCY)
+
+    async def check(provider: Provider) -> dict[str, Any]:
+        async with semaphore:
+            return await test_provider_key(provider.name, key)
+
     candidates = sorted(PROVIDERS, key=lambda p: p.priority)[:DETECT_MAX_PROVIDERS]
-    for provider in candidates:
-        result = await test_provider_key(provider.name, key)
-        if result.get("ok") or result.get("status") in (401, 403, 429):
-            results.append(result)
-    return results
+    results = await asyncio.gather(*(check(provider) for provider in candidates))
+    return [
+        result
+        for result in results
+        if result.get("ok") or result.get("status") in (401, 403, 429)
+    ]
 
 
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
@@ -141,7 +172,11 @@ async def complete(body: bytes) -> tuple[httpx.Response, str]:
             try:
                 request_payload = dict(payload)
                 request_payload["model"] = provider.model
-                response = await client.post(_url(provider), headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=request_payload)
+                response = await client.post(
+                    _url(provider),
+                    headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"},
+                    json=request_payload,
+                )
                 latency = time.monotonic() - started
                 last_response = response
                 last_provider = provider.name
