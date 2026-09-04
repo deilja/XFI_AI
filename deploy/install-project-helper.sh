@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 APP_DIR="/opt/xfi-ai"
-HELPER="$APP_DIR/deploy/xfi-ai-project-helper.py"
+HELPER="$APP_DIR/deploy/xfi_ai_project_helper.py"
 TARGET="/usr/local/libexec/xfi-ai-project-helper"
 SUDOERS="/etc/sudoers.d/xfi-ai-project-helper"
 [[ $EUID -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
