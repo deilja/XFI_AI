@@ -109,6 +109,49 @@ async def project_generate(project: str, request: Request, x_admin_key: str | No
         raise HTTPException(400, f"Изменения не подготовлены: {type(exc).__name__}") from exc
 
 
+@router.post("/admin/projects/{project}/customize")
+async def project_customize(project: str, request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    """Apply one natural-language customization through the guarded edit pipeline.
+
+    Without confirm=true this endpoint only analyzes and prepares a patch. This
+    keeps a natural-language request from changing a live project accidentally.
+    """
+    _auth(x_admin_key, x_admin_session)
+    project = _project(project)
+    body = await _body(request, max_bytes=131072)
+    text = str(body.get("request", "")).strip()
+    answers = body.get("answers", [])
+    confirm = body.get("confirm", False)
+    restart = body.get("restart", True)
+    if not isinstance(answers, list):
+        raise HTTPException(400, "answers должен быть массивом")
+    if not isinstance(confirm, bool) or not isinstance(restart, bool):
+        raise HTTPException(400, "confirm и restart должны быть boolean")
+    try:
+        analysis = await analyze(project, text, answers)
+        if not analysis["ready"]:
+            record("уточнение_кастомизации", project, ready=False, files=analysis["files"])
+            return {"ok": False, "stage": "questions", **analysis}
+        patch = await generate_edits(project, text, answers)
+        preview = {
+            "ok": not confirm,
+            "stage": "preview" if not confirm else "apply",
+            "project": project,
+            "summary": patch["summary"],
+            "edits": [{"path": e["path"], "reason": e["reason"]} for e in patch["edits"]],
+            "tests": patch.get("tests", []),
+        }
+        if not confirm:
+            record("предпросмотр_кастомизации", project, files=[e["path"] for e in patch["edits"]])
+            return preview
+        result = await apply_edits_async(project, patch["edits"], restart=restart)
+        record("кастомизация", project, files=result["changed"], backup=result["backup"], restart=restart)
+        return {**preview, "ok": True, "result": result}
+    except Exception as exc:
+        record("ошибка_кастомизации", project, error=type(exc).__name__)
+        raise HTTPException(409, f"Кастомизация не применена: {type(exc).__name__}: {exc}") from exc
+
+
 @router.post("/admin/projects/{project}/apply")
 async def project_apply(project: str, request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     _auth(x_admin_key, x_admin_session)
