@@ -1,0 +1,3 @@
+# Installed as /etc/sudoers.d/xfi-ai-project-helper (0440, root:root).
+# XFI AI may invoke only the fixed helper; no arbitrary root shell/systemctl access.
+xfi-ai ALL=(root) NOPASSWD: /usr/local/libexec/xfi-ai-project-helper
