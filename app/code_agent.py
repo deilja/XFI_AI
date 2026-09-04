@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -272,7 +273,7 @@ async def wait_for_ci(branch: str, timeout: int = CI_TIMEOUT_SECONDS, poll: int 
             if head_sha:
                 checks = await client.get(
                     f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs",
-                    headers={**headers, "Accept": "application/vnd.github+json"},
+                    headers=headers,
                     params={"per_page": 50},
                 )
                 checks.raise_for_status()
