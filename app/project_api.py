@@ -6,8 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from .project_editor import PROJECTS, analyze, apply_edits_async, generate_edits, project_config
-from .vps_manager import audit
+from .project_audit import recent, record
+from .project_editor import PROJECTS, _health, analyze, apply_edits_async, generate_edits, project_config
 
 router = APIRouter(prefix="/admin/projects", tags=["projects"])
 
@@ -55,7 +55,16 @@ async def project_status(project: str, x_admin_key: str | None = Header(default=
     cfg = project_config(project)
     from .project_editor import _run
     rc, state = await asyncio.to_thread(_run, cfg, ["systemctl", "is-active", cfg["service"]], 10)
-    return {"id": project, "name": cfg["name"], "path": cfg["path"], "service": cfg["service"], "active": rc == 0 and state.strip().splitlines()[-1:] == ["active"], "status": state}
+    health_ok = None
+    health_error = None
+    if rc == 0 and state.strip() == "active" and cfg["health"]:
+        try:
+            await asyncio.to_thread(_health, cfg)
+            health_ok = True
+        except Exception as exc:
+            health_ok = False
+            health_error = type(exc).__name__
+    return {"id": project, "name": cfg["name"], "path": cfg["path"], "service": cfg["service"], "active": rc == 0 and state.strip().splitlines()[-1:] == ["active"], "status": state, "health": health_ok, "health_error": health_error}
 
 
 @router.post("/{project}/analyze")
@@ -68,8 +77,11 @@ async def project_analyze(project: str, request: Request, x_admin_key: str | Non
     if not isinstance(history, list):
         raise HTTPException(400, "history must be an array")
     try:
-        return await analyze(project, text, history)
+        result = await analyze(project, text, history)
+        record("analyze", project, ready=result["ready"], files=result["files"])
+        return result
     except Exception as exc:
+        record("analyze_failed", project, error=type(exc).__name__)
         raise HTTPException(400, f"Analysis failed: {type(exc).__name__}") from exc
 
 
@@ -83,8 +95,11 @@ async def project_generate(project: str, request: Request, x_admin_key: str | No
     if not isinstance(answers, list):
         raise HTTPException(400, "answers must be an array")
     try:
-        return await generate_edits(project, text, answers)
+        result = await generate_edits(project, text, answers)
+        record("generate", project, files=[e["path"] for e in result["edits"]])
+        return result
     except Exception as exc:
+        record("generate_failed", project, error=type(exc).__name__)
         raise HTTPException(400, f"Generation failed: {type(exc).__name__}") from exc
 
 
@@ -102,13 +117,22 @@ async def project_apply(project: str, request: Request, x_admin_key: str | None 
     if not isinstance(restart, bool):
         raise HTTPException(400, "restart must be boolean")
     try:
-        return await apply_edits_async(project, edits, restart=restart)
+        result = await apply_edits_async(project, edits, restart=restart)
+        record("apply", project, files=result["changed"], backup=result["backup"], restart=restart)
+        return result
     except Exception as exc:
+        record("apply_failed_rollback", project, files=[str(e.get("path", "")) for e in edits if isinstance(e, dict)], error=type(exc).__name__)
         raise HTTPException(409, f"Project change rejected or rolled back: {type(exc).__name__}: {exc}") from exc
 
 
 @router.get("/{project}/audit")
 async def project_audit(project: str, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     _auth(x_admin_key, x_admin_session)
-    _project(project)
-    return {"project": project, "audit": audit()}
+    project = _project(project)
+    return {"project": project, "audit": [x for x in recent() if x.get("project") == project]}
+
+
+@router.get("/audit/all")
+async def all_project_audit(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    _auth(x_admin_key, x_admin_session)
+    return {"audit": recent()}
