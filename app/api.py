@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .integration_contract import contract as integration_contract
-from .integrations import snapshot as integrations_snapshot
+from .integrations import get_integration, snapshot as integrations_snapshot, valid_registration_token
 from .key_store import consume, create_key, delete_key, list_keys, set_active, update_limits, valid_key
 from .metrics import snapshot
 from .phobos_api import router as phobos_router
@@ -28,6 +28,8 @@ ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 ADMIN_SESSION_TTL = 15 * 60
 ADMIN_LOGIN_WINDOW = 60.0
 ADMIN_LOGIN_MAX_ATTEMPTS = 5
+REGISTRATION_WINDOW = 60.0
+REGISTRATION_MAX_ATTEMPTS = 5
 PROVIDER_DETECT_COOLDOWN = 10.0
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
@@ -43,6 +45,7 @@ OPENCLAW_ALLOWED = {
 _provider_detect_lock = asyncio.Lock()
 _provider_detect_last = 0.0
 _admin_login_attempts: dict[str, deque[float]] = defaultdict(deque)
+_registration_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -97,14 +100,22 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_admin_login_rate(request: Request) -> None:
+def _check_rate(bucket_map: dict[str, deque[float]], request: Request, window: float, maximum: int, message: str) -> None:
     now = time.monotonic()
-    bucket = _admin_login_attempts[_client_ip(request)]
-    while bucket and now - bucket[0] >= ADMIN_LOGIN_WINDOW:
+    bucket = bucket_map[_client_ip(request)]
+    while bucket and now - bucket[0] >= window:
         bucket.popleft()
-    if len(bucket) >= ADMIN_LOGIN_MAX_ATTEMPTS:
-        raise HTTPException(429, "Too many admin login attempts")
+    if len(bucket) >= maximum:
+        raise HTTPException(429, message)
     bucket.append(now)
+
+
+def _check_admin_login_rate(request: Request) -> None:
+    _check_rate(_admin_login_attempts, request, ADMIN_LOGIN_WINDOW, ADMIN_LOGIN_MAX_ATTEMPTS, "Too many admin login attempts")
+
+
+def _check_registration_rate(request: Request) -> None:
+    _check_rate(_registration_attempts, request, REGISTRATION_WINDOW, REGISTRATION_MAX_ATTEMPTS, "Too many integration registration attempts")
 
 
 def require_proxy_key(authorization: str | None) -> str:
@@ -147,6 +158,31 @@ async def health():
 @app.get("/v1/integrations/contract")
 async def integration_contract_endpoint():
     return integration_contract()
+
+
+@app.post("/v1/integrations/register")
+async def register_integration(request: Request, x_xfi_registration_token: str | None = Header(default=None)):
+    """Bootstrap one of the allowlisted XFI clients with a dedicated xfi_ API key."""
+    _check_registration_rate(request)
+    body = await read_json(request, max_bytes=8192)
+    integration_id = str(body.get("integration_id", "")).strip()
+    integration = get_integration(integration_id)
+    if not integration or not valid_registration_token(integration_id, x_xfi_registration_token or ""):
+        raise HTTPException(403, "Invalid integration registration credentials")
+    name = str(body.get("name", integration.name)).strip()[:100] or integration.name
+    try:
+        rpm, daily = int(body.get("rpm", 60)), int(body.get("daily", 5000))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "rpm and daily must be integers") from exc
+    if not (1 <= rpm <= 10000 and 1 <= daily <= 1000000):
+        raise HTTPException(400, "limits are out of range")
+    api_key = create_key(f"integration:{integration.id}:{name}", rpm, daily)
+    return {
+        "ok": True,
+        "integration": {"id": integration.id, "name": integration.name, "capabilities": list(integration.capabilities)},
+        "api_key": api_key,
+        "warning": "Save this key now. It is not stored in plaintext.",
+    }
 
 
 @app.get("/admin/integrations")
