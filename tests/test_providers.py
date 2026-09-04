@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app import providers
+from app.model_manager import ModelManager
 
 
 @pytest.mark.asyncio
@@ -22,6 +23,7 @@ async def test_complete_reports_actual_last_provider(monkeypatch):
     monkeypatch.setattr(providers.httpx, "AsyncClient", lambda **kwargs: FakeClient())
     monkeypatch.setattr(providers, "_state", {})
     monkeypatch.setattr(providers, "record", lambda *args, **kwargs: None)
+    monkeypatch.setattr(providers, "MODEL_MANAGER", ModelManager())
     response, provider = await providers.complete(json.dumps({"messages": []}).encode())
     assert response.status_code == 500
     assert provider == "gemini"
@@ -65,6 +67,7 @@ async def test_complete_uses_capability_provider_order_and_strips_routing_metada
     monkeypatch.setattr(providers, "_state", {})
     monkeypatch.setattr(providers, "provider_state", lambda name: {})
     monkeypatch.setattr(providers, "record", lambda *args, **kwargs: None)
+    monkeypatch.setattr(providers, "MODEL_MANAGER", ModelManager())
     response, provider = await providers.complete(json.dumps({"messages": [], "xfi_capability": "support"}).encode())
 
     assert response.status_code == 200
