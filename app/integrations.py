@@ -24,7 +24,7 @@ INTEGRATIONS = (
         kind="telegram_vpn_backend",
         description="Telegram VPN backend and support client for XFI AI Gateway.",
         env_url="XFI_CONNECT_URL",
-        env_token="XFI_CONNECT_AI_TOKEN",
+        env_token="XFI_CONNECT_AI_TOKEN",  # nosec B106 - environment variable name, not a secret
         capabilities=("ai", "support", "vpn", "code-agent"),
     ),
     Integration(
@@ -33,7 +33,7 @@ INTEGRATIONS = (
         kind="web_vpn_control_plane",
         description="Telegram Mini App and Web Admin client using XFI AI for diagnostics.",
         env_url="XFI_3XUI_WEBAPP_URL",
-        env_token="XFI_3XUI_WEBAPP_AI_TOKEN",
+        env_token="XFI_3XUI_WEBAPP_AI_TOKEN",  # nosec B106 - environment variable name, not a secret
         capabilities=("ai", "diagnostics", "3x-ui", "phobos", "web-admin"),
     ),
 )
