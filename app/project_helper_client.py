@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - required for the fixed, non-shell helper invocation
 from typing import Any
 
 HELPER = os.getenv("XFI_AI_PROJECT_HELPER", "/usr/local/libexec/xfi-ai-project-helper")
@@ -28,7 +28,7 @@ def call(payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
     if action not in {"read", "apply", "restart", "health"}:
         raise ValueError("Unsupported helper action")
     proc = subprocess.run(
-        ["sudo", "-n", HELPER],
+        ["/usr/bin/sudo", "-n", HELPER],
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
         capture_output=True,
