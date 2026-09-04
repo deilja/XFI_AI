@@ -1,6 +1,7 @@
 """First-class integrations exposed by the XFI AI control-plane."""
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -56,7 +57,7 @@ def registration_token_configured(integration_id: str) -> bool:
 def valid_registration_token(integration_id: str, token: str) -> bool:
     item = get_integration(integration_id)
     configured = os.getenv(item.env_registration, "").strip() if item else ""
-    return bool(configured and token and len(token) <= 512 and __import__("hmac").compare_digest(token, configured))
+    return bool(configured and token and len(token) <= 512 and hmac.compare_digest(token, configured))
 
 
 def _configured_url(name: str) -> str:
