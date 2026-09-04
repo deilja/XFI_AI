@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from .integration_contract import contract as integration_contract
+
 
 @dataclass(frozen=True)
 class Integration:
@@ -66,3 +68,8 @@ def snapshot() -> list[dict[str, object]]:
             }
         )
     return result
+
+
+def contract() -> dict[str, object]:
+    """Return the public, versioned integration contract without secrets."""
+    return integration_contract()
