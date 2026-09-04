@@ -20,19 +20,23 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
         }
-        connection.outputStream.use {
-            it.write(JSONObject().put("key", adminKey).toString().toByteArray(Charsets.UTF_8))
-        }
+        connection.outputStream.use { it.write(JSONObject().put("key", adminKey).toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
         val text = readText(connection, code)
         if (code !in 200..299) throw IllegalStateException("Login failed ($code): ${errorMessage(text)}")
-        val cookie = connection.headerFields.entries
+        return connection.headerFields.entries
             .firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }
             ?.value?.firstOrNull()
             ?.substringBefore(';')
             ?.removePrefix("xfi_admin_session=")
+            ?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("XFI AI did not return an admin session")
-        return cookie
+    }
+
+    fun logout() {
+        val connection = connection("/admin/session/logout", "POST")
+        connection.responseCode
+        connection.disconnect()
     }
 
     fun dashboard(): DashboardStatus {
@@ -43,12 +47,7 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
         val json = JSONObject(text)
         val summary = json.optJSONObject("summary") ?: JSONObject()
         val contract = json.optJSONObject("contract") ?: JSONObject()
-        return DashboardStatus(
-            summary.optInt("integrations_ready"),
-            summary.optInt("integrations_total"),
-            summary.optInt("providers_configured"),
-            contract.optString("version", "unknown")
-        )
+        return DashboardStatus(summary.optInt("integrations_ready"), summary.optInt("integrations_total"), summary.optInt("providers_configured"), contract.optString("version", "unknown"))
     }
 
     fun projectStatus(project: String): ProjectStatus {
@@ -57,13 +56,7 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
         val text = readText(connection, code)
         if (code !in 200..299) throw IllegalStateException(errorMessage(text))
         val json = JSONObject(text)
-        return ProjectStatus(
-            json.optString("id", project),
-            json.optString("name", project),
-            json.optBoolean("active", false),
-            if (json.has("health") && !json.isNull("health")) json.optBoolean("health") else null,
-            json.optString("status", "unknown").trim()
-        )
+        return ProjectStatus(json.optString("id", project), json.optString("name", project), json.optBoolean("active", false), if (json.has("health") && !json.isNull("health")) json.optBoolean("health") else null, json.optString("status", "unknown").trim())
     }
 
     fun customize(project: String, request: String, confirm: Boolean = false): AiResult {
@@ -71,24 +64,17 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
         }
-        val body = JSONObject().apply {
-            put("request", request)
-            put("confirm", confirm)
-            put("restart", true)
-        }.toString()
+        val body = JSONObject().apply { put("request", request); put("confirm", confirm); put("restart", true) }.toString()
         connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
         val text = readText(connection, code)
-        val json = runCatching { JSONObject(text) }.getOrElse {
-            return AiResult(false, "Invalid XFI AI response", raw = text)
-        }
+        val json = runCatching { JSONObject(text) }.getOrElse { return AiResult(false, "Invalid XFI AI response", raw = text) }
         val edits = json.optJSONArray("edits").toEdits()
-        val files = json.optJSONArray("files").toStringList()
         return AiResult(
             ok = code in 200..299 && json.optBoolean("ok", true),
             summary = json.optString("summary", json.optString("message", "Request processed")),
             questions = json.optJSONArray("questions").toStringList(),
-            files = files.ifEmpty { edits.map { it.path } },
+            files = json.optJSONArray("files").toStringList().ifEmpty { edits.map { it.path } },
             edits = edits,
             tests = json.optJSONArray("tests").toStringList(),
             raw = text
@@ -97,14 +83,12 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
 
     private fun readText(connection: HttpURLConnection, code: Int): String {
         val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        return stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        return stream?.bufferedReader()?.use { it.readText() }.orEmpty().also { connection.disconnect() }
     }
 
     private fun errorMessage(text: String): String = runCatching { JSONObject(text).optString("detail", text) }.getOrDefault(text).ifBlank { "XFI AI request failed" }
 
-    private fun JSONArray?.toStringList(): List<String> = if (this == null) emptyList() else buildList {
-        for (i in 0 until length()) add(optString(i))
-    }
+    private fun JSONArray?.toStringList(): List<String> = if (this == null) emptyList() else buildList { for (i in 0 until length()) add(optString(i)) }
 
     private fun JSONArray?.toEdits(): List<EditPreview> = if (this == null) emptyList() else buildList {
         for (i in 0 until length()) {
