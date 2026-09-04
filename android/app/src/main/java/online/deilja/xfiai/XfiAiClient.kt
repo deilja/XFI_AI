@@ -7,7 +7,11 @@ import java.net.URL
 
 class SessionExpiredException(message: String = "XFI AI admin session expired") : IllegalStateException(message)
 
-class XfiAiClient(private val baseUrl: String, private val session: String? = null) {
+class XfiAiClient(
+    private val baseUrl: String,
+    private val session: String? = null,
+    private val openConnection: (String) -> HttpURLConnection = { URL(it).openConnection() as HttpURLConnection }
+) {
     init {
         require(baseUrl.trim().startsWith("https://")) { "XFI AI endpoint must use HTTPS" }
     }
@@ -18,7 +22,7 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
     }
 
     private fun connection(path: String, method: String): HttpURLConnection =
-        (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+        openConnection(baseUrl.trimEnd('/') + path).apply {
             requestMethod = method
             connectTimeout = 10000
             readTimeout = 60000
