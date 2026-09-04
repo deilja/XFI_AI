@@ -1,12 +1,18 @@
 """Admin API helpers for the independent Phobos provider."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .phobos_adapter import PhobosAdapter
 
-router = APIRouter(prefix="/admin/phobos", tags=["phobos"])
+router = APIRouter(prefix="/admin/phobos", tags=["phobos"], dependencies=[Depends(require_phobos_admin)])
+
+
+def require_phobos_admin(request: Request) -> None:
+    # Lazy import avoids a circular import: app.api owns the FastAPI application.
+    from .api import require_admin
+    require_admin(request.headers.get("x-xfi-admin-key"), request.headers.get("x-xfi-admin-session"))
 
 
 class ClientCreate(BaseModel):
