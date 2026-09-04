@@ -9,6 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -17,6 +18,8 @@ from .providers import complete
 MAX_FILE_BYTES = 120_000
 MAX_FILES = 8
 MAX_REQUEST_CHARS = 8_000
+CI_TIMEOUT_SECONDS = 300
+CI_POLL_SECONDS = 10
 
 SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты помогаешь изменять код Telegram-бота XFI_CONNECT по простому запросу на русском.
 Работай осторожно: не придумывай файлы и API. Сначала выясни недостающие требования.
@@ -39,6 +42,13 @@ class AgentResult:
     questions: list[str]
     summary: str
     files: list[str]
+
+
+@dataclass
+class CIResult:
+    state: str
+    summary: str
+    checks: list[str]
 
 
 def _repo() -> str:
@@ -88,7 +98,8 @@ async def _repo_tree() -> dict[str, str]:
 
 
 async def _file(path: str, ref: str = "HEAD") -> str:
-    data = await _github_get(f"/repos/{_repo()}/contents/{path}?ref={ref}")
+    encoded = quote(path, safe="/")
+    data = await _github_get(f"/repos/{_repo()}/contents/{encoded}?ref={quote(ref, safe='')}")
     raw = base64.b64decode(data["content"].replace("\n", ""))
     if len(raw) > MAX_FILE_BYTES:
         raise RuntimeError(f"File too large: {path}")
@@ -208,7 +219,7 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
         create.raise_for_status()
         for edit in edits:
             current = await client.get(
-                f"https://api.github.com/repos/{repo}/contents/{edit['path']}",
+                f"https://api.github.com/repos/{repo}/contents/{quote(edit['path'], safe='/')}",
                 headers=headers,
                 params={"ref": branch},
             )
@@ -220,7 +231,7 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
                 "branch": branch,
             }
             updated = await client.put(
-                f"https://api.github.com/repos/{repo}/contents/{edit['path']}",
+                f"https://api.github.com/repos/{repo}/contents/{quote(edit['path'], safe='/')}",
                 headers=headers,
                 json=payload,
             )
@@ -239,3 +250,48 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
         pr.raise_for_status()
         pr_url = pr.json().get("html_url", "")
     return branch, f"https://github.com/{repo}/tree/{branch}", pr_url
+
+
+async def wait_for_ci(branch: str, timeout: int = CI_TIMEOUT_SECONDS, poll: int = CI_POLL_SECONDS) -> CIResult:
+    """Wait for GitHub Checks on the branch head and return a compact result."""
+    repo = _repo()
+    headers = _headers()
+    deadline = time.monotonic() + max(30, min(timeout, 900))
+    async with httpx.AsyncClient(timeout=20) as client:
+        head_sha = ""
+        while time.monotonic() < deadline:
+            pr_response = await client.get(
+                f"https://api.github.com/repos/{repo}/pulls",
+                headers=headers,
+                params={"head": f"{repo.split('/', 1)[0]}:{branch}", "state": "open", "per_page": 10},
+            )
+            pr_response.raise_for_status()
+            prs = pr_response.json()
+            if prs:
+                head_sha = prs[0].get("head", {}).get("sha", "")
+            if head_sha:
+                checks = await client.get(
+                    f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs",
+                    headers={**headers, "Accept": "application/vnd.github+json"},
+                    params={"per_page": 50},
+                )
+                checks.raise_for_status()
+                items = checks.json().get("check_runs", [])
+                if items:
+                    names = []
+                    pending = False
+                    failed = False
+                    for item in items:
+                        name = str(item.get("name", "check"))
+                        status = str(item.get("status", ""))
+                        conclusion = str(item.get("conclusion", ""))
+                        names.append(f"{name}: {conclusion or status}")
+                        if status != "completed":
+                            pending = True
+                        elif conclusion not in {"success", "neutral", "skipped"}:
+                            failed = True
+                    if not pending:
+                        state = "fail" if failed else "pass"
+                        return CIResult(state, "GitHub Checks завершены.", names[:20])
+            await asyncio.sleep(poll)
+    return CIResult("timeout", "GitHub Checks не завершились за отведённое время.", [])
