@@ -89,7 +89,17 @@ async def _ask(messages: list[dict[str, str]]) -> str:
     body = json.dumps({"messages": messages, "temperature": 0.1, "max_tokens": 3000}).encode()
     response, _ = await complete(body)
     response.raise_for_status()
-    return response.json()["choices"]["message"]["content"] if isinstance(response.json().get("choices"), dict) else response.json()["choices"][0]["message"]["content"]
+    payload = response.json()
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        content = choices[0].get("message", {}).get("content")
+    elif isinstance(choices, dict):
+        content = choices.get("message", {}).get("content")
+    else:
+        content = None
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("AI returned no message content")
+    return content
 
 
 async def analyze_local(request: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -180,9 +190,12 @@ def apply_local_edits(edits: list[dict[str, str]], restart: bool = True) -> dict
             for path in changed:
                 if path.endswith(".py"):
                     py_compile.compile(str(_resolve(path)), doraise=True)
-            rc, output = _run(["python", "-m", "compileall", "-q", "."], 30)
-            if rc != 0:
-                raise RuntimeError(f"compileall failed: {output[-3000:]}")
+            python = shutil.which("python3") or shutil.which("python") or "python3"
+            for path in changed:
+                if path.endswith(".py"):
+                    rc, output = _run([python, "-m", "py_compile", path], 30)
+                    if rc != 0:
+                        raise RuntimeError(f"py_compile failed for {path}: {output[-3000:]}")
             if restart:
                 rc, output = _run(["systemctl", "restart", SERVICE], 20)
                 if rc != 0:
