@@ -46,7 +46,7 @@ async def help_command(message: types.Message) -> None:
     if not _is_admin(message):
         await message.answer("Доступ запрещён.")
         return
-    await message.answer("/token — выпустить токен\n/code — начать изменение XFI_CONNECT\n/cancel — отменить задачу\n\nПосле /code опишите задачу обычным текстом. Бот задаст уточняющие вопросы, сформирует план и ждёт «ПОДТВЕРЖДАЮ». Изменения записываются только в отдельную ветку GitHub.")
+    await message.answer("/token — выпустить токен\n/code — начать изменение XFI_CONNECT\n/cancel — отменить задачу\n\nПосле /code опишите задачу обычным текстом. Бот задаст уточняющие вопросы, сформирует план и ждёт «ПОДТВЕРЖДАЮ». После подтверждения создаётся ветка и Pull Request; main напрямую не изменяется.")
 
 
 @router.message(Command("token"))
@@ -160,14 +160,14 @@ async def conversational_code(message: types.Message) -> None:
             if not patch:
                 await message.answer("Нет подготовленных изменений. Начните заново через /code.")
                 return
-            await message.answer("Подтверждение получено. Создаю отдельную ветку и записываю изменения…")
+            await message.answer("Подтверждение получено. Создаю отдельную ветку, записываю изменения и открываю Pull Request…")
             try:
-                branch, url = await create_branch_and_commit(patch["edits"], f"feat: {patch['summary'][:80]}")
+                branch, tree_url, pr_url = await create_branch_and_commit(patch["edits"], f"feat: {patch['summary'][:80]}")
             except (RuntimeError, ValueError, TypeError, KeyError, httpx.HTTPError):
-                await message.answer("Не удалось записать изменения в GitHub. Изменения не применены к main.")
+                await message.answer("Не удалось записать изменения в GitHub или открыть Pull Request. Изменения не применены к main.")
                 return
             _sessions.pop(user_id, None)
-            await message.answer(f"Изменения сохранены в ветке {branch}.\n{url}\n\nXFI AI не меняет main напрямую.")
+            await message.answer(f"Готово. Ветка: {branch}\n\nPR: {pr_url}\nВетка: {tree_url}\n\nmain напрямую не изменён. CI XFI_CONNECT проверит Pull Request.")
         return
     if session["state"] == "ready":
         await message.answer("Ожидаю «ПОДТВЕРЖДАЮ» или /cancel.")
