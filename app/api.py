@@ -45,9 +45,9 @@ _admin_login_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.cookies.get("xfi_admin_session") and not request.headers.get("x-xfi-admin-session"):
+        if request.cookies.get("xfi_admin_session") and not request.headers.get("x-admin-session"):
             headers = list(request.scope.get("headers", []))
-            headers.append((b"x-xfi-admin-session", request.cookies["xfi_admin_session"].encode()))
+            headers.append((b"x-admin-session", request.cookies["xfi_admin_session"].encode()))
             request.scope["headers"] = headers
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
