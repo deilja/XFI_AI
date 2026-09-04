@@ -122,8 +122,15 @@ def _run_ssh(row, remote: str):
     args = _ssh_base(row)
     if not remote or len(remote) > 12000 or "\x00" in remote:
         raise ValueError("remote command is empty, too long, or invalid")
+    # SSH syntax is: ssh [options] [--] destination [command...].
+    # Keep the destination before the remote command while placing the option
+    # terminator before the destination so a hostile-looking host cannot be
+    # interpreted as an SSH option.
+    destination = args[-1]
+    ssh_args = args[:-1] + ["--", destination, remote]
     proc = subprocess.run(  # nosec B603 - shell=False; remote command is internally generated
-        args + ["--", remote], capture_output=True, text=True, timeout=20, check=False, env={"PATH": "/usr/bin:/bin", "HOME": os.getenv("HOME", "")}
+        ssh_args, capture_output=True, text=True, timeout=20, check=False,
+        env={"PATH": "/usr/bin:/bin", "HOME": os.getenv("HOME", "")},
     )
     return proc.returncode, (proc.stdout + proc.stderr).strip()[-8000:]
 
