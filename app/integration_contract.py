@@ -18,7 +18,7 @@ def contract() -> dict[str, object]:
         "integration": {
             "status": "configured | unavailable",
             "health": "self-reported",
-            "registration": "bootstrap token -> dedicated xfi_ client key",
+            "registration": "bootstrap credential -> dedicated xfi_ client key",
             "secrets": "never returned",
         },
         "capabilities": {
