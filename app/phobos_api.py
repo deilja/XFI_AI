@@ -13,8 +13,7 @@ def require_phobos_admin(request: Request) -> None:
     require_admin(request.headers.get("x-xfi-admin-key"), request.headers.get("x-xfi-admin-session"))
 
 
-router = APIRouter(prefix="/admin/phobos", tags=["phobos"], dependencies=[Depends(require_phobos_admin)])
-router.include_router(project_router)
+router = APIRouter(tags=["phobos", "проекты"])
 
 
 class ClientCreate(BaseModel):
@@ -23,7 +22,10 @@ class ClientCreate(BaseModel):
     preset_id: str | None = Field(default=None, max_length=128)
 
 
-@router.get("/health")
+phobos_guard = [Depends(require_phobos_admin)]
+
+
+@router.get("/admin/phobos/health", dependencies=phobos_guard)
 async def health():
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().health()}
@@ -31,7 +33,7 @@ async def health():
         raise HTTPException(status_code=502, detail=f"Проверка Phobos не выполнена: {type(exc).__name__}") from exc
 
 
-@router.get("/clients")
+@router.get("/admin/phobos/clients", dependencies=phobos_guard)
 async def clients():
     try:
         return {"ok": True, "provider": "phobos", "clients": await PhobosAdapter().clients()}
@@ -39,7 +41,7 @@ async def clients():
         raise HTTPException(status_code=502, detail=f"Список клиентов Phobos недоступен: {type(exc).__name__}") from exc
 
 
-@router.post("/clients")
+@router.post("/admin/phobos/clients", dependencies=phobos_guard)
 async def create_client(body: ClientCreate):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().create_client(body.name, body.expires_at, body.preset_id)}
@@ -47,7 +49,7 @@ async def create_client(body: ClientCreate):
         raise HTTPException(status_code=502, detail=f"Не удалось создать клиента Phobos: {type(exc).__name__}") from exc
 
 
-@router.get("/clients/{client_id}")
+@router.get("/admin/phobos/clients/{client_id}", dependencies=phobos_guard)
 async def get_client(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().client(client_id)}
@@ -55,7 +57,7 @@ async def get_client(client_id: str):
         raise HTTPException(status_code=502, detail=f"Клиент Phobos недоступен: {type(exc).__name__}") from exc
 
 
-@router.get("/clients/{client_id}/config")
+@router.get("/admin/phobos/clients/{client_id}/config", dependencies=phobos_guard)
 async def client_config(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().client_config(client_id)}
@@ -63,7 +65,7 @@ async def client_config(client_id: str):
         raise HTTPException(status_code=502, detail=f"Конфигурация Phobos недоступна: {type(exc).__name__}") from exc
 
 
-@router.post("/clients/{client_id}/enable")
+@router.post("/admin/phobos/clients/{client_id}/enable", dependencies=phobos_guard)
 async def enable(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().client_enable(client_id)}
@@ -71,7 +73,7 @@ async def enable(client_id: str):
         raise HTTPException(status_code=502, detail=f"Не удалось включить клиента: {type(exc).__name__}") from exc
 
 
-@router.post("/clients/{client_id}/disable")
+@router.post("/admin/phobos/clients/{client_id}/disable", dependencies=phobos_guard)
 async def disable(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().client_disable(client_id)}
@@ -79,7 +81,7 @@ async def disable(client_id: str):
         raise HTTPException(status_code=502, detail=f"Не удалось отключить клиента: {type(exc).__name__}") from exc
 
 
-@router.delete("/clients/{client_id}")
+@router.delete("/admin/phobos/clients/{client_id}", dependencies=phobos_guard)
 async def delete(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().client_delete(client_id)}
@@ -87,7 +89,7 @@ async def delete(client_id: str):
         raise HTTPException(status_code=502, detail=f"Не удалось удалить клиента: {type(exc).__name__}") from exc
 
 
-@router.post("/clients/{client_id}/install-link")
+@router.post("/admin/phobos/clients/{client_id}/install-link", dependencies=phobos_guard)
 async def install_link(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "result": await PhobosAdapter().install_link(client_id)}
@@ -95,9 +97,12 @@ async def install_link(client_id: str):
         raise HTTPException(status_code=502, detail=f"Install Link Phobos недоступен: {type(exc).__name__}") from exc
 
 
-@router.get("/clients/{client_id}/qrcode")
+@router.get("/admin/phobos/clients/{client_id}/qrcode", dependencies=phobos_guard)
 async def qrcode(client_id: str):
     try:
         return {"ok": True, "provider": "phobos", "svg": await PhobosAdapter().qrcode(client_id)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"QR-код Phobos недоступен: {type(exc).__name__}") from exc
+
+
+router.include_router(project_router)
