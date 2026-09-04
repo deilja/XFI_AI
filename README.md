@@ -28,7 +28,8 @@
 - диагностика VPS и ограниченный безопасный restart разрешённых сервисов;
 - OpenClaw control-plane для Telegram и auto-heal сценариев;
 - Telegram Code Agent, который понимает обычные текстовые задачи и правит XFI CONNECT после уточняющих вопросов и подтверждения;
-- работа Code Agent только через отдельную ветку и Pull Request.
+- работа Code Agent только через отдельную ветку и Pull Request;
+- единый реестр интеграций **XFI_CONNECT** и **XFI_3XUI_WebApp**.
 
 ## Архитектура
 
@@ -36,11 +37,65 @@
   <img src="docs/assets/xfi-ai-architecture.svg" alt="XFI AI architecture — clients, gateway, providers and VPS control" width="100%">
 </p>
 
-Архитектура построена вокруг одного XFI token: клиенту не требуется знать ключи конкретных AI-провайдеров, а provider credentials остаются на серверной стороне.
+```text
+XFI_CONNECT ───────────────┐
+Telegram / VPN / Support   │
+                            ├──► XFI AI Gateway ──► AI Providers
+XFI_3XUI_WebApp ───────────┤            │
+Mini App / Web Admin       │            ├──► Provider failover
+                            │            ├──► Client API keys
+OpenClaw / Code Agent ─────┘            └──► Metrics / Audit
+```
+
+Архитектура построена вокруг одного XFI token: клиентам не требуется знать ключи конкретных AI-провайдеров, а provider credentials остаются на серверной стороне.
+
+## Интеграции XFI
+
+### XFI_CONNECT
+
+[XFI_CONNECT](https://github.com/deilja/XFI_CONNECT) использует XFI AI Gateway как единый AI backend для Telegram VPN-бота и support workflow.
+
+- один клиентский `xfi_...` token;
+- `/ai` для AI-помощника;
+- `/ai_token` для безопасной настройки Gateway;
+- реальные ключи Groq/Gemini/OpenRouter и других providers не хранятся в XFI_CONNECT;
+- Telegram Code Agent использует отдельный контролируемый workflow через branch → commit → Pull Request → CI.
+
+### XFI_3XUI_WebApp
+
+[XFI_3XUI_WebApp](https://github.com/deilja/XFI_3XUI_WebApp) использует XFI AI для административной AI-диагностики VPN-узлов.
+
+- Telegram Mini App и Web Admin остаются независимым приложением;
+- XFI AI вызывается сервер-сервер через `XFI_AI_URL` + `XFI_AI_TOKEN`;
+- `/api/admin/ai/health` проверяет доступность Gateway;
+- `/api/admin/ai/diagnose-node/:id` передаёт AI только безопасные метаданные узла;
+- секреты, пароли, токены, UUID и приватные ключи в AI-контекст не передаются;
+- поддерживаются диагностика 3X-UI/Xray и Phobos-сценариев.
+
+### Реестр интеграций
+
+Администратор XFI AI может получить безопасный снимок подключений:
+
+```text
+GET /admin/integrations
+```
+
+Endpoint показывает только наличие URL/token и список capabilities. Сами URL и секреты не возвращаются.
+
+Для внешних клиентов предусмотрены отдельные переменные:
+
+```env
+XFI_CONNECT_URL=
+XFI_CONNECT_AI_TOKEN=
+XFI_3XUI_WEBAPP_URL=
+XFI_3XUI_WEBAPP_AI_TOKEN=
+```
+
+Эти переменные нужны именно для отображения статуса интеграции в control-plane; клиентские приложения продолжают использовать свои серверные `XFI_AI_URL`/`XFI_AI_TOKEN`.
 
 ## Статус
 
-Production-ready компоненты проходят автоматические GitHub Actions проверки. Gateway и Code Agent покрываются тестами, lint и security checks.
+Production-ready компоненты проходят автоматические GitHub Actions проверки. Gateway, Code Agent и интеграционный слой покрываются тестами, lint и security checks.
 
 ## AI-провайдеры
 
@@ -75,7 +130,8 @@ Web Admin может проверить неизвестный ключ:
 GET  /health
 GET  /v1/models
 POST /v1/chat/completions
-GET  /api/keys
+GET  /admin/integrations
+GET  /admin/keys
 POST /api/keys
 ```
 
@@ -107,20 +163,11 @@ Code Agent ограничивает размер запроса и файлов,
 
 `/token` выдаёт новый XFI API key. Токен показывается один раз.
 
-## XFI_CONNECT integration
-
-XFI CONNECT подключается к Gateway одним токеном. Администратор получает его в XFI AI через `/token`, а затем задаёт в XFI CONNECT через:
-
-```text
-/ai_token xfi_...
-```
-
-После проверки токен сохраняется на стороне XFI CONNECT. Пользовательские запросы выполняются командой `/ai`.
-
 ## Web Admin
 
 Web Admin предоставляет:
 
+- реестр XFI интеграций;
 - выпуск, активацию и деактивацию XFI client keys;
 - определение AI provider по API key;
 - метрики provider'ов;
@@ -197,6 +244,11 @@ XFI_AI_PROVIDERS=groq,gemini,cloudflare,openrouter,mistral,sambanova,cerebras,hu
 XFI_AI_ADMIN_KEY=
 XFI_AI_DB=/var/lib/xfi-ai/keys.db
 XFI_AI_KEY_PEPPER=
+
+XFI_CONNECT_URL=
+XFI_CONNECT_AI_TOKEN=
+XFI_3XUI_WEBAPP_URL=
+XFI_3XUI_WEBAPP_AI_TOKEN=
 ```
 
 Модели можно переопределять через соответствующие `*_MODEL`.
@@ -231,7 +283,7 @@ GitHub Actions выполняет тесты, lint, security checks, dependency 
 ## Связанные проекты
 
 - **XFI_CONNECT** — Telegram VPN-бот и сервис управления подписками, использующий XFI AI Gateway.
-- **XFI Guard** — мониторинг и защита VPS-инфраструктуры XFI.
+- **XFI_3XUI_WebApp** — Telegram Mini App/Web Admin и VPN control-plane с AI-диагностикой через XFI AI.
 
 ## Лицензия
 
