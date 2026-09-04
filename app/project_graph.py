@@ -29,7 +29,10 @@ class Edge:
 
 def _safe(path: str) -> bool:
     parts = path.replace("\\", "/").split("/")
-    return bool(path) and not path.startswith("/") and ".." not in parts and not any(part.lower() in BLOCKED_PARTS or any(blocked in part.lower() for blocked in BLOCKED_PARTS) for part in parts)
+    return bool(path) and not path.startswith("/") and ".." not in parts and not any(
+        part.lower() in BLOCKED_PARTS or any(blocked in part.lower() for blocked in BLOCKED_PARTS)
+        for part in parts
+    )
 
 
 def _python_imports(text: str) -> list[str]:
@@ -41,8 +44,15 @@ def _python_imports(text: str) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             result.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            result.append("." * node.level + node.module)
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level
+            if node.module:
+                result.append(prefix + node.module)
+                result.extend(
+                    prefix + node.module + "." + alias.name
+                    for alias in node.names
+                    if alias.name != "*"
+                )
     return result
 
 
