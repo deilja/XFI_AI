@@ -2,8 +2,25 @@
 set -u
 
 LOG=/var/log/xfi-ai-heal.log
+LOCK=/run/lock/xfi-ai-heal.lock
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 exec >>"$LOG" 2>&1
+
+# Prevent overlapping cron/systemd/manual runs. A hung run is also bounded.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "SKIP: another XFI AI health check is already running"
+  exit 0
+fi
+
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "FAIL: timeout command is required"
+  exit 1
+fi
+
+run() {
+  timeout --signal=TERM --kill-after=3s 15s "$@"
+}
 
 echo "=== $(date -Is) XFI AI health check ==="
 
@@ -15,11 +32,14 @@ for s in x-ui 3x-ui xray nginx docker; do
 done
 
 for s in "${services[@]}"; do
-  if ! systemctl is-active --quiet "$s"; then
+  if ! run systemctl is-active --quiet "$s"; then
     echo "WARN: $s is not active; restarting once"
-    systemctl restart "$s" || { echo "FAIL: restart $s"; continue; }
+    if ! run systemctl restart "$s"; then
+      echo "FAIL: restart $s"
+      continue
+    fi
     sleep 2
-    if systemctl is-active --quiet "$s"; then
+    if run systemctl is-active --quiet "$s"; then
       echo "OK: $s recovered"
     else
       echo "FAIL: $s still down after restart"
@@ -30,8 +50,8 @@ for s in "${services[@]}"; do
 done
 
 if command -v docker >/dev/null 2>&1; then
-  docker ps --format 'container={{.Names}} status={{.Status}}' || true
+  run docker ps --format 'container={{.Names}} status={{.Status}}' || true
 fi
 
-df -h / | tail -1 || true
-free -h | head -2 || true
+run df -h / | tail -1 || true
+run free -h | head -2 || true
