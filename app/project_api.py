@@ -48,6 +48,12 @@ async def list_projects(x_admin_key: str | None = Header(default=None), x_admin_
     return {"projects": result}
 
 
+@router.get("/audit/all")
+async def all_project_audit(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    _auth(x_admin_key, x_admin_session)
+    return {"audit": recent()}
+
+
 @router.get("/{project}")
 async def project_status(project: str, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     _auth(x_admin_key, x_admin_session)
@@ -130,9 +136,3 @@ async def project_audit(project: str, x_admin_key: str | None = Header(default=N
     _auth(x_admin_key, x_admin_session)
     project = _project(project)
     return {"project": project, "audit": [x for x in recent() if x.get("project") == project]}
-
-
-@router.get("/audit/all")
-async def all_project_audit(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
-    _auth(x_admin_key, x_admin_session)
-    return {"audit": recent()}
