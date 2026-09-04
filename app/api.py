@@ -118,7 +118,7 @@ def require_proxy_key(authorization: str | None) -> str:
 
 def run_command(args: list[str], timeout: int = 8) -> tuple[int, str]:
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 - fixed command argv; shell=False
         return p.returncode, (p.stdout + p.stderr).strip()[-5000:]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
