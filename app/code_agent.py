@@ -189,7 +189,7 @@ async def generate_edits(request: str, answers: list[dict[str, str]]) -> dict[st
     }
 
 
-async def create_branch_and_commit(edits: list[dict[str, str]], message: str) -> tuple[str, str]:
+async def create_branch_and_commit(edits: list[dict[str, str]], message: str) -> tuple[str, str, str]:
     repo = _repo()
     headers = _headers()
     branch = f"xfi-ai/{int(time.time())}"
@@ -225,4 +225,17 @@ async def create_branch_and_commit(edits: list[dict[str, str]], message: str) ->
                 json=payload,
             )
             updated.raise_for_status()
-    return branch, f"https://github.com/{repo}/tree/{branch}"
+        pr = await client.post(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers=headers,
+            json={
+                "title": message[:120],
+                "head": branch,
+                "base": "main",
+                "body": "Изменения подготовлены XFI AI по подтверждённому запросу администратора.\n\nCI должен проверить ветку автоматически. Слияние в main выполняется отдельно.",
+                "draft": False,
+            },
+        )
+        pr.raise_for_status()
+        pr_url = pr.json().get("html_url", "")
+    return branch, f"https://github.com/{repo}/tree/{branch}", pr_url
