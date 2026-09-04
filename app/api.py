@@ -5,7 +5,7 @@ import hmac
 import json
 import os
 import secrets
-import subprocess  # nosec B404 - only fixed allowlisted local commands are executed
+import subprocess  # nosec B404 - fixed local commands only
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -15,22 +15,11 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .key_store import (
-    consume,
-    create_key,
-    delete_key,
-    list_keys,
-    set_active,
-    update_limits,
-    valid_key,
-)
+from .key_store import consume, create_key, delete_key, list_keys, set_active, update_limits, valid_key
 from .metrics import snapshot
-from .providers import (
-    complete,
-    configured_providers,
-    detect_provider_key,
-    test_provider_key,
-)
+from .phobos_api import router as phobos_router
+from .provider_registry import providers as vpn_providers
+from .providers import complete, configured_providers, detect_provider_key, test_provider_key
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
@@ -40,6 +29,7 @@ ADMIN_LOGIN_MAX_ATTEMPTS = 5
 PROVIDER_DETECT_COOLDOWN = 10.0
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
+app.include_router(phobos_router)
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 OPENCLAW_ALLOWED = {
     "status": ["openclaw", "gateway", "status"],
@@ -55,14 +45,10 @@ _admin_login_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Browser sessions authenticate with the HttpOnly cookie. The API endpoints
-        # already accept X-XFI-Admin-Session, so copy the cookie into the internal
-        # request header without ever exposing the session token in a response.
         if request.cookies.get("xfi_admin_session") and not request.headers.get("x-xfi-admin-session"):
             headers = list(request.scope.get("headers", []))
             headers.append((b"x-xfi-admin-session", request.cookies["xfi_admin_session"].encode()))
             request.scope["headers"] = headers
-
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -92,8 +78,7 @@ def _valid_session(token: str | None) -> bool:
         timestamp = int(timestamp_b)
         if abs(time.time() - timestamp) > ADMIN_SESSION_TTL:
             return False
-        payload = timestamp_b + b"." + nonce_b
-        expected = hmac.new(ADMIN_KEY.encode(), payload, hashlib.sha256).digest()
+        expected = hmac.new(ADMIN_KEY.encode(), timestamp_b + b"." + nonce_b, hashlib.sha256).digest()
         return hmac.compare_digest(signature, expected)
     except (ValueError, TypeError, UnicodeDecodeError):
         return False
@@ -107,8 +92,6 @@ def require_admin(key: str | None, session: str | None = None) -> None:
 
 
 def _client_ip(request: Request) -> str:
-    # Do not trust X-Forwarded-For here: it is client-controlled unless a trusted
-    # proxy explicitly normalizes it. The socket address is safe for this limiter.
     return request.client.host if request.client else "unknown"
 
 
@@ -135,9 +118,7 @@ def require_proxy_key(authorization: str | None) -> str:
 
 def run_command(args: list[str], timeout: int = 8) -> tuple[int, str]:
     try:
-        p = subprocess.run(  # nosec B603 - shell=False; callers use fixed allowlisted command arrays
-            args, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
         return p.returncode, (p.stdout + p.stderr).strip()[-5000:]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
@@ -158,7 +139,13 @@ async def read_json(request: Request, max_bytes: int = 65536) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "providers": [p.name for p in configured_providers()]}
+    return {"status": "ok", "providers": [p.name for p in configured_providers()], "vpn_providers": vpn_providers()}
+
+
+@app.get("/admin/vpn/providers")
+async def admin_vpn_providers(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
+    return {"providers": vpn_providers()}
 
 
 @app.post("/admin/session")
@@ -169,9 +156,8 @@ async def admin_session(request: Request):
     if not ADMIN_KEY or not key or len(key) != len(ADMIN_KEY) or not hmac.compare_digest(key, ADMIN_KEY):
         raise HTTPException(403, "Forbidden")
     now = int(time.time())
-    token = _session_token(now, secrets.token_urlsafe(24))
     response = JSONResponse({"ok": True, "expires_in": ADMIN_SESSION_TTL})
-    response.set_cookie("xfi_admin_session", token, max_age=ADMIN_SESSION_TTL, httponly=True, secure=True, samesite="strict", path="/")
+    response.set_cookie("xfi_admin_session", _session_token(now, secrets.token_urlsafe(24)), max_age=ADMIN_SESSION_TTL, httponly=True, secure=True, samesite="strict", path="/")
     return response
 
 
@@ -192,7 +178,10 @@ async def admin_keys(x_admin_key: str | None = Header(default=None), x_admin_ses
 async def admin_key_active(key_id: int, request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
-    set_active(key_id, bool(body.get("active", True)))
+    value = body.get("active", True)
+    if not isinstance(value, bool):
+        raise HTTPException(400, "active must be boolean")
+    set_active(key_id, value)
     return {"ok": True}
 
 
@@ -227,8 +216,7 @@ async def admin_providers(x_admin_key: str | None = Header(default=None), x_admi
 async def admin_provider_test(request: Request, x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     require_admin(x_admin_key, x_admin_session)
     body = await read_json(request)
-    key = str(body.get("key", ""))
-    provider = str(body.get("provider", ""))
+    key, provider = str(body.get("key", "")), str(body.get("provider", ""))
     if not key or len(key) > 1000 or not provider or len(provider) > 100:
         raise HTTPException(400, "provider and key are required")
     return await test_provider_key(provider, key)
@@ -295,7 +283,7 @@ async def admin_vps_add(request: Request, x_admin_key: str | None = Header(defau
     body = await read_json(request)
     try:
         vid = add_vps(str(body.get("name", body.get("host", "VPS"))), str(body["host"]), int(body.get("port", 22)), str(body.get("username", "root")), str(body.get("auth_type", "key")), str(body.get("auth_value", "")))
-    except (KeyError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "id": vid}
 
@@ -360,20 +348,14 @@ async def chat_completions(request: Request, authorization: str | None = Header(
         raise HTTPException(413, "Request too large")
     try:
         response, provider = await complete(body)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except TypeError as exc:
+    except (ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, "AI provider unavailable") from exc
     except Exception as exc:
         raise HTTPException(503, "AI provider unavailable") from exc
     if response.status_code >= 400:
-        return JSONResponse(
-            {"error": {"message": "AI provider request failed", "type": "upstream_error", "code": "upstream_http_error"}},
-            status_code=502,
-            headers={"X-XFI-AI-Provider": provider},
-        )
+        return JSONResponse({"error": {"message": "AI provider request failed", "type": "upstream_error", "code": "upstream_http_error"}}, status_code=502, headers={"X-XFI-AI-Provider": provider})
     try:
         payload = response.json()
     except ValueError as exc:
