@@ -83,5 +83,4 @@ class ModelManager:
 
 def capability_models(capability: str) -> tuple[str, ...]:
     env_name = f"XFI_AI_{capability.strip().upper().replace('-', '_')}_MODELS"
-    configured = tuple(x.strip() for x in os.getenv(env_name, "").split(",") if x.strip())
-    return configured
+    return tuple(x.strip() for x in os.getenv(env_name, "").split(",") if x.strip())
