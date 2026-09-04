@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .metrics import record
+from .metrics import provider_state, record
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,10 @@ def configured_providers() -> list[Provider]:
 
 
 def _score(p: Provider) -> float:
-    s = _state.get(p.name, {})
+    s = _state.get(p.name)
+    if s is None:
+        s = provider_state(p.name)
+        _state[p.name] = s
     cooldown = max(0.0, s.get("cooldown_until", 0) - time.time())
     if cooldown:
         return 10000 + cooldown
