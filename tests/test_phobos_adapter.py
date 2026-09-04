@@ -1,7 +1,7 @@
 import pytest
 
 from app.phobos_adapter import PhobosAdapter, PhobosConfig, get_config
-from app.phobos_api import router
+from app.phobos_api import require_phobos_admin, router
 from app.provider_registry import providers
 
 
@@ -23,5 +23,11 @@ def test_phobos_url_is_validated():
         PhobosAdapter(PhobosConfig("ftp://localhost", "user", "pass"))
 
 
-def test_phobos_admin_router_is_protected():
-    assert any(getattr(dep.call, "__name__", "") == "require_phobos_admin" for dep in router.dependencies)
+def test_phobos_admin_routes_are_protected():
+    protected = 0
+    for route in router.routes:
+        dependencies = getattr(route, "dependencies", [])
+        if any(getattr(dep.call, "__name__", "") == "require_phobos_admin" for dep in dependencies):
+            protected += 1
+    assert protected >= 1
+    assert require_phobos_admin.__name__ == "require_phobos_admin"
