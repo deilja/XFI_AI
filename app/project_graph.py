@@ -9,7 +9,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .project_editor import MAX_CONTEXT_FILES, SKIP_DIRS, safe_path
+MAX_GRAPH_FILES = 500
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", ".cache", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build", ".next", ".turbo", "coverage"}
+BLOCKED_PARTS = (".env", "secret", "credential", "private_key", "id_rsa", ".pem", ".key")
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,11 @@ class Edge:
     source: str
     target: str
     kind: str
+
+
+def _safe(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    return bool(path) and not path.startswith("/") and ".." not in parts and not any(part.lower() in BLOCKED_PARTS or any(blocked in part.lower() for blocked in BLOCKED_PARTS) for part in parts)
 
 
 def _python_imports(text: str) -> list[str]:
@@ -70,7 +77,7 @@ def _resolve_import(source: str, imported: str, known: set[str], kind: str) -> s
     return None
 
 
-def build_graph(root: Path, limit: int = MAX_CONTEXT_FILES) -> dict[str, Any]:
+def build_graph(root: Path, limit: int = MAX_GRAPH_FILES) -> dict[str, Any]:
     root = root.resolve()
     if not root.is_dir():
         raise RuntimeError(f"Project directory not found: {root}")
@@ -83,7 +90,7 @@ def build_graph(root: Path, limit: int = MAX_CONTEXT_FILES) -> dict[str, Any]:
                 rel = path.relative_to(root).as_posix()
             except (OSError, ValueError):
                 continue
-            if safe_path(rel) and len(paths) < limit:
+            if _safe(rel) and len(paths) < limit:
                 paths[rel] = path
     known = set(paths)
     nodes = [Node(path, _kind(path)) for path in sorted(paths)]
