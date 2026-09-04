@@ -1,6 +1,20 @@
 # XFI AI
 
-AI Gateway и control-plane экосистемы XFI. Единый `xfi_...` API key, маршрутизация между AI-провайдерами, failover, административная панель, VPS Control Center и Telegram Code Agent для безопасного изменения кода XFI CONNECT через Pull Request.
+<p align="center">
+  <img src="docs/assets/xfi-ai-overview.svg" alt="XFI AI overview" width="100%">
+</p>
+
+<p align="center">
+  <strong>AI Gateway и control-plane экосистемы XFI</strong><br>
+  Единый API, маршрутизация между AI-провайдерами, failover, Web Admin, VPS Control Center и Telegram Code Agent.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-Gateway-009688?logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Security-Bandit%20%2B%20Audit-111827" alt="Security">
+  <img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white" alt="CI">
+</p>
 
 ## Что делает XFI AI
 
@@ -14,50 +28,17 @@ AI Gateway и control-plane экосистемы XFI. Единый `xfi_...` API
 - Telegram Code Agent, который понимает обычные текстовые задачи и правит XFI CONNECT после уточняющих вопросов и подтверждения;
 - работа Code Agent только через отдельную ветку и Pull Request.
 
+## Архитектура
+
+<p align="center">
+  <img src="docs/assets/xfi-ai-architecture.svg" alt="XFI AI architecture" width="100%">
+</p>
+
+Клиент использует один XFI token. Реальные ключи AI-провайдеров остаются на сервере.
+
 ## Статус
 
 Production-ready компоненты проходят автоматические GitHub Actions проверки. Gateway и Code Agent покрываются тестами, lint и security checks.
-
-## Архитектура
-
-```text
-                    ┌──────────────────────┐
-                    │      XFI CLIENTS     │
-                    │ XFI_CONNECT / /ai API│
-                    └──────────┬───────────┘
-                               │ xfi_ token
-                               ▼
-                    ┌──────────────────────┐
-                    │    XFI AI Gateway    │
-                    │ FastAPI + HTTPX      │
-                    ├──────────────────────┤
-                    │ key auth / limits    │
-                    │ provider routing     │
-                    │ failover / metrics   │
-                    │ audit                │
-                    └──────────┬───────────┘
-                               │
-          ┌────────────────────┼────────────────────┐
-          ▼                    ▼                    ▼
-        Groq                 Gemini             OpenRouter
-          │                    │                    │
-          └──────────── другие providers ──────────┘
-
- Telegram
-    │
-    ▼
-XFI AI Code Agent
-    │
-    ├── анализ XFI_CONNECT
-    ├── уточняющие вопросы
-    ├── план изменений
-    ├── подтверждение
-    └── branch → commits → Pull Request → CI
-
- OpenClaw
-    │
-    └── диагностика и безопасное обслуживание VPS
-```
 
 ## AI-провайдеры
 
@@ -96,8 +77,6 @@ GET  /api/keys
 POST /api/keys
 ```
 
-Клиент использует только XFI token. Реальные ключи AI-провайдеров остаются на сервере.
-
 ## Telegram Code Agent
 
 Code Agent предназначен для управляемой разработки XFI CONNECT без прямой записи в `main`.
@@ -105,37 +84,11 @@ Code Agent предназначен для управляемой разрабо
 ### Цикл изменения
 
 ```text
-Пользователь
-    │
-    ▼
-/code
-    │
-    ▼
-Текстовая задача
-    │
-    ▼
-Анализ репозитория
-    │
-    ▼
-Уточняющие вопросы
-    │
-    ▼
-План + список файлов + проверки
-    │
-    ▼
-ПОДТВЕРЖДАЮ
-    │
-    ▼
-Ветка xfi-ai/*
-    │
-    ▼
-Изменения
-    │
-    ▼
-Pull Request
-    │
-    ▼
-GitHub Actions
+Пользователь → /code → задача → анализ → вопросы → план
+                                      ↓
+                                 ПОДТВЕРЖДАЮ
+                                      ↓
+                              branch → commits → PR → CI
 ```
 
 Code Agent ограничивает размер запроса и файлов, блокирует чувствительные пути (`.env`, credentials, private keys), работает только с безопасными существующими файлами и не должен выполнять произвольные shell-команды.
