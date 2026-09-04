@@ -33,3 +33,5 @@ jobs:
           gradle-version: "8.10"
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
+      - name: Run unit tests
+        run: gradle --no-daemon test
