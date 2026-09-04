@@ -13,7 +13,7 @@ def client(monkeypatch, tmp_path):
     api.ADMIN_KEY = "test-admin-key"
     key_store.DB = tmp_path / "keys.db"
     metrics.DB = tmp_path / "keys.db"
-    return TestClient(api.app)
+    return TestClient(api.app, base_url="https://testserver")
 
 
 def test_admin_session_sets_httponly_cookie(client):
