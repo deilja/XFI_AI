@@ -42,20 +42,20 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { XfiAiApp(XfiSecureStore(this)) }
+        setContent { XfiAiApp(XfiRepository(this), XfiSecureStore(this)) }
     }
 }
 
 private enum class Screen { Dashboard, Agent, Projects, Settings }
 
 @Composable
-private fun XfiAiApp(store: XfiSecureStore) {
+private fun XfiAiApp(repository: XfiRepository, store: XfiSecureStore) {
     var screen by remember { mutableStateOf(Screen.Dashboard) }
     var project by remember { mutableStateOf("connect") }
     var request by remember { mutableStateOf("") }
-    var endpoint by remember { mutableStateOf("") }
+    var endpoint by remember { mutableStateOf(store.loadEndpoint()) }
     var adminKey by remember { mutableStateOf("") }
-    var session by remember { mutableStateOf<String?>(store.loadSession()) }
+    var session by remember { mutableStateOf<String?>(repository.session()) }
     var dashboard by remember { mutableStateOf<DashboardStatus?>(null) }
     var projectStatus by remember { mutableStateOf<ProjectStatus?>(null) }
     var result by remember { mutableStateOf<AiResult?>(null) }
@@ -63,24 +63,40 @@ private fun XfiAiApp(store: XfiSecureStore) {
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else XfiAiClient(endpoint, session)
+    fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else repository.client(endpoint)
+
+    fun expireSession() {
+        repository.run { }
+        session = null
+        dashboard = null
+        projectStatus = null
+        result = null
+        message = "Admin session expired. Connect again in Settings."
+        screen = Screen.Settings
+    }
 
     fun refresh() {
         val client = api() ?: return
         busy = true
-        scope.launch(Dispatchers.IO) {
-            val outcome = runCatching {
-                dashboard = client.dashboard()
-                projectStatus = client.projectStatus(project)
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching { client.dashboard() to client.projectStatus(project) }
             }
-            withContext(Dispatchers.Main) {
-                message = outcome.exceptionOrNull()?.message
-                busy = false
+            outcome.onSuccess { (d, p) ->
+                dashboard = d
+                projectStatus = p
+                message = null
+            }.onFailure { error ->
+                if (error is SessionExpiredException) expireSession()
+                else message = error.message ?: "Refresh failed"
             }
+            busy = false
         }
     }
 
-    LaunchedEffect(project, session, endpoint) { if (session != null && endpoint.isNotBlank()) refresh() }
+    LaunchedEffect(project, session, endpoint) {
+        if (session != null && endpoint.isNotBlank()) refresh()
+    }
 
     MaterialTheme {
         Scaffold(
@@ -103,43 +119,61 @@ private fun XfiAiApp(store: XfiSecureStore) {
                         onAnalyze = {
                             val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
-                            scope.launch(Dispatchers.IO) {
-                                val r = runCatching { client.customize(project, request) }
-                                    .getOrElse { AiResult(false, it.message ?: "Connection failed") }
-                                withContext(Dispatchers.Main) { result = r; message = null; busy = false }
+                            scope.launch {
+                                val r = withContext(Dispatchers.IO) {
+                                    runCatching { client.customize(project, request) }
+                                        .getOrElse { AiResult(false, it.message ?: "Connection failed") }
+                                }
+                                if (r.raw.contains("\"stage\":\"questions\"")) {
+                                    result = r.copy(ok = false)
+                                } else {
+                                    result = r
+                                }
+                                busy = false
                             }
                         },
                         onApply = {
                             val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
-                            scope.launch(Dispatchers.IO) {
-                                val r = runCatching { client.customize(project, request, true) }
-                                    .getOrElse { AiResult(false, it.message ?: "Apply failed") }
-                                withContext(Dispatchers.Main) { result = r; message = null; busy = false; refresh() }
+                            scope.launch {
+                                val r = withContext(Dispatchers.IO) {
+                                    runCatching { client.customize(project, request, true) }
+                                        .getOrElse { AiResult(false, it.message ?: "Apply failed") }
+                                }
+                                if (r.raw.contains("401")) expireSession() else result = r
+                                busy = false
+                                if (session != null) refresh()
                             }
                         }
                     )
                     Screen.Projects -> Projects(project) { project = it }
                     Screen.Settings -> Settings(
-                        endpoint, { endpoint = it }, adminKey, { adminKey = it }, session != null,
+                        endpoint, { endpoint = it; store.saveEndpoint(it) }, adminKey, { adminKey = it }, session != null,
                         onLogin = {
-                            if (endpoint.isBlank() || adminKey.isBlank()) { message = "Enter XFI AI URL and admin key"; return@Settings }
+                            if (endpoint.isBlank() || adminKey.isBlank()) { message = "Enter XFI AI HTTPS URL and admin key"; return@Settings }
                             busy = true
-                            scope.launch(Dispatchers.IO) {
-                                val r = runCatching { XfiAiClient(endpoint).login(adminKey) }
-                                withContext(Dispatchers.Main) {
-                                    r.onSuccess {
-                                        store.saveSession(it)
-                                        session = it
-                                        adminKey = ""
-                                        message = "Connected"
-                                    }.onFailure { message = it.message ?: "Login failed" }
-                                    busy = false
-                                }
+                            scope.launch {
+                                val r = withContext(Dispatchers.IO) { runCatching { repository.login(endpoint, adminKey) } }
+                                r.onSuccess {
+                                    session = it
+                                    adminKey = ""
+                                    message = "Connected"
+                                    screen = Screen.Dashboard
+                                }.onFailure { message = it.message ?: "Login failed" }
+                                busy = false
                             }
                         },
                         onLogout = {
-                            store.clearSession(); session = null; dashboard = null; projectStatus = null; message = "Disconnected"
+                            busy = true
+                            scope.launch {
+                                withContext(Dispatchers.IO) { repository.logout(endpoint) }
+                                session = null
+                                dashboard = null
+                                projectStatus = null
+                                result = null
+                                message = "Disconnected"
+                                busy = false
+                            }
                         },
                         busy = busy,
                         message = message
