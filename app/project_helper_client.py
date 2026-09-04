@@ -31,8 +31,7 @@ def call(payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
         ["sudo", "-n", HELPER],
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=timeout,
         check=False,
     )  # nosec B603 - fixed sudo/helper argv; no shell
