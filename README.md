@@ -288,3 +288,5 @@ GitHub Actions выполняет тесты, lint, security checks, dependency 
 ## Лицензия
 
 Лицензионные условия определяются текущими файлами репозитория.
+
+<!-- CI trigger: keep this marker unchanged; used only to trigger validation after a code-only fix. -->
