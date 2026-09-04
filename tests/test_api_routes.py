@@ -12,8 +12,10 @@ def test_independent_admin_routes_are_mounted_once():
     assert "/admin/phobos/health" in paths
     assert "/admin/phobos/clients" in paths
     assert "/admin/projects" in paths
-    assert "/admin/projects/connect" in paths
-    assert "/admin/projects/webapp" in paths
+    assert "/admin/projects/{project}" in paths
+    assert "/admin/projects/{project}/analyze" in paths
+    assert "/admin/projects/{project}/generate" in paths
+    assert "/admin/projects/{project}/apply" in paths
     assert not any(path.startswith("/admin/phobos/admin/projects") for path in paths)
 
 
