@@ -48,6 +48,12 @@ class XfiSecureStore(context: Context) {
         String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP)), Charsets.UTF_8)
     }.getOrNull()
 
+    fun saveEndpoint(endpoint: String) {
+        prefs.edit().putString("endpoint", endpoint.trim().trimEnd('/')).apply()
+    }
+
+    fun loadEndpoint(): String = prefs.getString("endpoint", "").orEmpty()
+
     fun clearSession() {
         prefs.edit().remove("session").remove("iv").apply()
     }
