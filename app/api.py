@@ -15,6 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .integration_contract import contract as integration_contract
 from .integrations import snapshot as integrations_snapshot
 from .key_store import consume, create_key, delete_key, list_keys, set_active, update_limits, valid_key
 from .metrics import snapshot
@@ -143,10 +144,33 @@ async def health():
     return {"status": "ok", "providers": [p.name for p in configured_providers()], "vpn_providers": vpn_providers()}
 
 
+@app.get("/v1/integrations/contract")
+async def integration_contract_endpoint():
+    return integration_contract()
+
+
 @app.get("/admin/integrations")
 async def admin_integrations(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
     require_admin(x_admin_key, x_admin_session)
     return {"integrations": integrations_snapshot()}
+
+
+@app.get("/admin/dashboard")
+async def admin_dashboard(x_admin_key: str | None = Header(default=None), x_admin_session: str | None = Header(default=None)):
+    require_admin(x_admin_key, x_admin_session)
+    integrations = integrations_snapshot()
+    providers = snapshot()
+    configured = [p.name for p in configured_providers()]
+    return {
+        "contract": {"protocol": integration_contract()["protocol"], "version": integration_contract()["version"]},
+        "integrations": integrations,
+        "providers": {"configured": configured, "metrics": providers},
+        "summary": {
+            "integrations_total": len(integrations),
+            "integrations_ready": sum(1 for item in integrations if item["configured"]),
+            "providers_configured": len(configured),
+        },
+    }
 
 
 @app.get("/admin/vpn/providers")
