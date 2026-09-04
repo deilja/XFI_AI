@@ -27,7 +27,7 @@ def test_phobos_admin_routes_are_protected():
     protected = 0
     for route in router.routes:
         dependencies = getattr(route, "dependencies", [])
-        if any(getattr(dep.call, "__name__", "") == "require_phobos_admin" for dep in dependencies):
+        if any(getattr(dep, "dependency", None) is require_phobos_admin for dep in dependencies):
             protected += 1
     assert protected >= 1
     assert require_phobos_admin.__name__ == "require_phobos_admin"
