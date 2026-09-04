@@ -1,8 +1,10 @@
 """Telegram control plane for independently installed XFI projects."""
+from __future__ import annotations
 
 import asyncio
 import json
 import os
+import time
 
 import httpx
 from aiogram import Bot, Dispatcher, Router, types
@@ -14,6 +16,8 @@ from .project_editor import PROJECTS, analyze, apply_edits_async, generate_edits
 router = Router()
 _sessions: dict[int, dict] = {}
 _locks: dict[int, asyncio.Lock] = {}
+SESSION_TTL = 20 * 60
+MAX_SESSIONS = 32
 
 
 def _admin_ids() -> set[int]:
@@ -43,12 +47,22 @@ def _usage() -> str:
     )
 
 
+def _session_ok(user_id: int) -> dict | None:
+    session = _sessions.get(user_id)
+    if not session:
+        return None
+    if time.monotonic() - float(session.get("created", 0)) > SESSION_TTL:
+        _sessions.pop(user_id, None)
+        return None
+    return session
+
+
 @router.message(Command("start"))
 async def start(message: types.Message) -> None:
     if not _is_admin(message):
         await message.answer("Доступ запрещён.")
         return
-    await message.answer("XFI AI Control Plane\n\n" + _usage())
+    await message.answer("XFI AI — панель управления\n\n" + _usage())
 
 
 @router.message(Command("help"))
@@ -58,8 +72,11 @@ async def help_command(message: types.Message) -> None:
         return
     await message.answer(
         _usage()
-        + "\n\nXFI_CONNECT и XFI_3XUI_WebApp — независимые проекты. XFI AI выбирает один установленный проект и работает только с ним."
-        + "\n\nПосле /code <project> задача анализируется локально, затем AI готовит изменения. После «ПОДТВЕРЖДАЮ» создаётся backup, проверяется stale SHA, выполняется валидация, перезапуск и health-check. При ошибке — rollback. GitHub для runtime-изменений не используется."
+        + "\n\nXFI_CONNECT и XFI_3XUI_WebApp — независимые проекты. "
+        "XFI AI выбирает один установленный проект и работает только с ним."
+        + "\n\nПосле /code задача анализируется локально, затем AI готовит изменения. "
+        "После «ПОДТВЕРЖДАЮ» создаётся backup, проверяется SHA, выполняется валидация, "
+        "перезапуск и health-check. При ошибке выполняется rollback. GitHub для runtime-изменений не используется."
     )
 
 
@@ -74,12 +91,7 @@ async def issue_token(message: types.Message) -> None:
     except ValueError:
         rpm, daily = 60, 5000
     token = create_key(name=f"XFI_AI:{message.from_user.id}", rpm_limit=rpm, daily_limit=daily)
-    await message.answer(
-        "Новый токен XFI AI создан.\n\n"
-        f"<code>{token}</code>\n\n"
-        "Токен показывается только сейчас; сохраните его в защищённом месте.",
-        parse_mode="HTML",
-    )
+    await message.answer("Новый токен XFI AI создан.\n\n<code>" + token + "</code>\n\nТокен показывается только сейчас.", parse_mode="HTML")
 
 
 @router.message(Command("code"))
@@ -90,10 +102,13 @@ async def start_code(message: types.Message) -> None:
     if len(args) < 2 or args[1].lower() not in PROJECTS:
         await message.answer("Укажите проект: /code connect <задача> или /code webapp <задача>")
         return
+    if len(_sessions) >= MAX_SESSIONS and message.from_user.id not in _sessions:
+        await message.answer("Слишком много активных задач. Завершите одну из текущих задач.")
+        return
     project = args[1].lower()
     request = args[2].strip() if len(args) > 2 else ""
     user_id = message.from_user.id
-    _sessions[user_id] = {"state": "request", "project": project, "request": request, "answers": [], "plan": None}
+    _sessions[user_id] = {"created": time.monotonic(), "state": "request", "project": project, "request": request, "answers": [], "plan": None}
     if request:
         await _process_request(message)
     else:
@@ -110,8 +125,9 @@ async def cancel(message: types.Message) -> None:
 
 async def _process_request(message: types.Message) -> None:
     user_id = message.from_user.id
-    session = _sessions.get(user_id)
+    session = _session_ok(user_id)
     if not session:
+        await message.answer("Сессия задачи истекла. Запустите /code заново.")
         return
     async with _lock(user_id):
         project = session["project"]
@@ -137,8 +153,9 @@ async def _process_request(message: types.Message) -> None:
 
 async def _generate_and_show(message: types.Message) -> None:
     user_id = message.from_user.id
-    session = _sessions.get(user_id)
+    session = _session_ok(user_id)
     if not session:
+        await message.answer("Сессия задачи истекла. Запустите /code заново.")
         return
     async with _lock(user_id):
         await message.answer("Требования понятны. Формирую изменения для установленной версии…")
@@ -149,16 +166,13 @@ async def _generate_and_show(message: types.Message) -> None:
             return
         session["patch"] = patch
         files = "\n".join(f"• {e['path']} — {e['reason']}" for e in patch["edits"])
-        tests = "\n".join(f"• {x}" for x in patch.get("tests", [])) or "• project-specific validation + service health-check"
+        tests = "\n".join(f"• {x}" for x in patch.get("tests", [])) or "• проверка проекта + проверка службы"
         await message.answer(
-            "План готов.\n\n"
-            f"{_short(patch['summary'], 1800)}\n\n"
-            f"Проект: {PROJECTS[session['project']]['name']}\n"
-            f"Изменяемые файлы:\n{files}\n\n"
+            "План готов.\n\n" + _short(patch["summary"], 1800) + "\n\n"
+            f"Проект: {PROJECTS[session['project']]['name']}\nИзменяемые файлы:\n{files}\n\n"
             f"Проверки:\n{tests}\n\n"
-            "После подтверждения изменения будут внесены НЕ в GitHub, а непосредственно в выбранный установленный проект.\n"
-            "Backup создаётся автоматически.\n"
-            "Для применения напишите: ПОДТВЕРЖДАЮ\nДля отмены: /cancel"
+            "Изменения будут внесены НЕ в GitHub, а непосредственно в выбранный установленный проект.\n"
+            "Backup создаётся автоматически.\n\nДля применения: ПОДТВЕРЖДАЮ\nДля отмены: /cancel"
         )
 
 
@@ -167,7 +181,7 @@ async def conversational_code(message: types.Message) -> None:
     if not _is_admin(message) or not message.text:
         return
     user_id = message.from_user.id
-    session = _sessions.get(user_id)
+    session = _session_ok(user_id)
     if not session:
         return
     text = message.text.strip()
@@ -196,15 +210,13 @@ async def conversational_code(message: types.Message) -> None:
             try:
                 result = await apply_edits_async(session["project"], patch["edits"], restart=True)
             except Exception as exc:
-                await message.answer(f"❌ Изменение НЕ прошло проверку. Выполнен автоматический rollback.\nОшибка: {type(exc).__name__}: {exc}")
+                await message.answer(f"Изменение НЕ прошло проверку. Выполнен автоматический rollback.\nОшибка: {type(exc).__name__}: {exc}")
                 _sessions.pop(user_id, None)
                 return
             _sessions.pop(user_id, None)
             await message.answer(
-                f"✅ {name} обновлён напрямую.\n\n"
-                f"Файлы: {', '.join(result['changed'])}\n"
-                f"Backup: {result['backup']}\n"
-                f"Служба: {result['service']} — active\n\n"
+                f"{name} обновлён напрямую.\n\nФайлы: {', '.join(result['changed'])}\n"
+                f"Backup: {result['backup']}\nСлужба: {result['service']} — active\n\n"
                 "XFI_CONNECT и XFI_3XUI_WebApp не зависят друг от друга. GitHub не использовался."
             )
         return
