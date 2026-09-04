@@ -34,3 +34,8 @@ data class EditPreview(
     val content: String = "",
     val expectedSha256: String = ""
 )
+
+data class Answer(
+    val question: String,
+    val answer: String
+)
