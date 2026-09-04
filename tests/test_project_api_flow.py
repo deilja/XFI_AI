@@ -1,13 +1,13 @@
-import pytest
-from starlette.requests import Request
-from fastapi import HTTPException
+import json
 
-import app.project_api as project_api
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+from app import project_api
 
 
 def _request(payload: dict) -> Request:
-    import json
-
     body = json.dumps(payload).encode()
 
     async def receive():
