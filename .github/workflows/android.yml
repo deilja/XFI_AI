@@ -35,3 +35,9 @@ jobs:
         run: gradle --no-daemon assembleDebug
       - name: Run unit tests
         run: gradle --no-daemon test
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: xfi-ai-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
