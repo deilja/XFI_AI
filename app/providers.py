@@ -58,10 +58,11 @@ def configured_providers() -> list[Provider]:
 
 
 def _score(p: Provider) -> float:
-    s = _state.get(p.name)
-    if s is None:
-        s = provider_state(p.name)
-        _state[p.name] = s
+    # Read persisted state on every routing decision so multiple gateway workers
+    # see failures/cooldowns recorded by another worker without stale process cache.
+    persisted = provider_state(p.name)
+    s = persisted if persisted else _state.get(p.name, {})
+    _state[p.name] = s
     cooldown = max(0.0, s.get("cooldown_until", 0) - time.time())
     if cooldown:
         return 10000 + cooldown
