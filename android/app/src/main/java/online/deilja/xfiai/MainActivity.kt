@@ -28,6 +28,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,27 +51,31 @@ private enum class Screen { Dashboard, Agent, Projects, Settings }
 
 @Composable
 private fun XfiAiApp(repository: XfiRepository) {
-    val store = remember { XfiSecureStore(androidx.compose.ui.platform.LocalContext.current.applicationContext) }
+    val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val store = remember { XfiSecureStore(context) }
     var screen by remember { mutableStateOf(Screen.Dashboard) }
     var project by remember { mutableStateOf("connect") }
     var request by remember { mutableStateOf("") }
     var endpoint by remember { mutableStateOf(store.loadEndpoint()) }
     var adminKey by remember { mutableStateOf("") }
-    var session by remember { mutableStateOf<String?>(repository.session()) }
+    var session by remember { mutableStateOf<String?>(null) }
     var dashboard by remember { mutableStateOf<DashboardStatus?>(null) }
     var projectStatus by remember { mutableStateOf<ProjectStatus?>(null) }
     var result by remember { mutableStateOf<AiResult?>(null) }
+    var answers by remember { mutableStateOf<List<Answer>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else repository.client(endpoint)
+    fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else XfiAiClient(endpoint, session)
 
     fun expireSession() {
         session = null
+        store.clearSession()
         dashboard = null
         projectStatus = null
         result = null
+        answers = emptyList()
         message = "Admin session expired. Connect again in Settings."
         screen = Screen.Settings
     }
@@ -84,6 +89,11 @@ private fun XfiAiApp(repository: XfiRepository) {
                 .onFailure { error -> if (error is SessionExpiredException) expireSession() else message = error.message ?: "Refresh failed" }
             busy = false
         }
+    }
+
+    LaunchedEffect(Unit) {
+        val saved = withContext(Dispatchers.IO) { store.loadSession() }
+        if (!saved.isNullOrBlank()) session = saved
     }
 
     LaunchedEffect(project, session, endpoint) {
@@ -104,21 +114,42 @@ private fun XfiAiApp(repository: XfiRepository) {
                 when (screen) {
                     Screen.Dashboard -> Dashboard(dashboard, projectStatus, session != null, busy, message) { screen = Screen.Agent }
                     Screen.Agent -> Agent(
-                        project, { project = it }, request, { request = it }, result, busy, session != null,
+                        project = project,
+                        chooseProject = { project = it; result = null; answers = emptyList() },
+                        request = request,
+                        setRequest = { request = it },
+                        result = result,
+                        answers = answers,
+                        busy = busy,
+                        authenticated = session != null,
                         onAnalyze = {
                             val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
                             scope.launch {
-                                val outcome = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        val analysis = client.analyze(project, request)
-                                        if (analysis.questions.isNotEmpty()) analysis else client.generate(project, request)
-                                    }
+                                val outcome = withContext(Dispatchers.IO) { runCatching { client.analyze(project, request) } }
+                                outcome.onSuccess {
+                                    result = it
+                                    answers = it.questions.map { question -> Answer(question, answers.firstOrNull { a -> a.question == question }?.answer.orEmpty()) }
+                                    message = if (it.questions.isEmpty()) null else "Answer the questions before building the patch"
+                                }.onFailure {
+                                    if (it is SessionExpiredException) expireSession() else result = AiResult(false, it.message ?: "Analysis failed")
                                 }
-                                outcome.onSuccess { result = it; message = null }
-                                    .onFailure { if (it is SessionExpiredException) expireSession() else result = AiResult(false, it.message ?: "Connection failed") }
                                 busy = false
                             }
+                        },
+                        onGenerate = {
+                            val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
+                            if (answers.any { it.answer.isBlank() }) { message = "Answer every clarification question"; return@Agent }
+                            busy = true
+                            scope.launch {
+                                val outcome = withContext(Dispatchers.IO) { runCatching { client.generate(project, request, answers) } }
+                                outcome.onSuccess { result = it; message = null }
+                                    .onFailure { if (it is SessionExpiredException) expireSession() else message = it.message ?: "Patch generation failed" }
+                                busy = false
+                            }
+                        },
+                        onAnswer = { question, answer ->
+                            answers = answers.map { if (it.question == question) it.copy(answer = answer) else it }
                         },
                         onApply = {
                             val patch = result?.edits.orEmpty()
@@ -151,7 +182,7 @@ private fun XfiAiApp(repository: XfiRepository) {
                             busy = true
                             scope.launch {
                                 withContext(Dispatchers.IO) { repository.logout(endpoint) }
-                                session = null; dashboard = null; projectStatus = null; result = null
+                                session = null; dashboard = null; projectStatus = null; result = null; answers = emptyList()
                                 message = "Disconnected"; busy = false
                             }
                         }, busy = busy, message = message
@@ -213,8 +244,20 @@ private fun Dashboard(dashboard: DashboardStatus?, status: ProjectStatus?, conne
 }
 
 @Composable
-private fun Agent(project: String, chooseProject: (String) -> Unit, request: String, setRequest: (String) -> Unit,
-                  result: AiResult?, busy: Boolean, authenticated: Boolean, onAnalyze: () -> Unit, onApply: () -> Unit) {
+private fun Agent(
+    project: String,
+    chooseProject: (String) -> Unit,
+    request: String,
+    setRequest: (String) -> Unit,
+    result: AiResult?,
+    answers: List<Answer>,
+    busy: Boolean,
+    authenticated: Boolean,
+    onAnalyze: () -> Unit,
+    onGenerate: () -> Unit,
+    onAnswer: (String, String) -> Unit,
+    onApply: () -> Unit
+) {
     LazyColumn(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("AI Code Agent", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
         item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -224,18 +267,34 @@ private fun Agent(project: String, chooseProject: (String) -> Unit, request: Str
         item { OutlinedTextField(value = request, onValueChange = { setRequest(it.take(8000)) }, Modifier.fillMaxWidth(), minLines = 5,
             label = { Text("Describe the change") }, placeholder = { Text("Make the start message modern and add a Support button") }) }
         item { Button(onClick = onAnalyze, enabled = authenticated && !busy && request.isNotBlank(), Modifier.fillMaxWidth()) {
-            Text(if (busy) "Analyzing…" else "Analyze & Build Preview")
+            Text(if (busy) "Analyzing…" else "Analyze architecture")
         } }
         result?.let { r -> item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(if (r.ok) "Patch preview" else "Request failed", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(if (r.ok) "Agent result" else "Request failed", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(r.summary)
             if (r.architectureNodes != null) Text("Architecture: ${r.architectureNodes} nodes / ${r.architectureEdges ?: 0} edges", style = MaterialTheme.typography.bodySmall)
-            if (r.questions.isNotEmpty()) { HorizontalDivider(); Text("Clarification required", fontWeight = FontWeight.Bold); r.questions.forEach { Text("• $it") }; Text("Add the answers to your request and analyze again.", style = MaterialTheme.typography.bodySmall) }
-            if (r.edits.isNotEmpty()) { HorizontalDivider(); Text("Files to change", fontWeight = FontWeight.Bold); r.edits.forEach { edit ->
-                Text(edit.path, fontWeight = FontWeight.Bold)
-                if (edit.reason.isNotBlank()) Text(edit.reason, style = MaterialTheme.typography.bodySmall)
-                if (edit.content.isNotBlank()) { Text("New content preview", style = MaterialTheme.typography.labelMedium); Text(edit.content.take(1200), style = MaterialTheme.typography.bodySmall) }
-            } }
+            if (r.questions.isNotEmpty()) {
+                HorizontalDivider()
+                Text("Clarification required", fontWeight = FontWeight.Bold)
+                r.questions.forEach { question ->
+                    val answer = answers.firstOrNull { it.question == question }?.answer.orEmpty()
+                    OutlinedTextField(value = answer, onValueChange = { onAnswer(question, it.take(2000)) }, Modifier.fillMaxWidth(), label = { Text(question) })
+                }
+                Button(onClick = onGenerate, enabled = !busy && answers.all { it.answer.isNotBlank() }, Modifier.fillMaxWidth()) {
+                    Text(if (busy) "Building patch…" else "Build patch")
+                }
+            }
+            if (r.edits.isNotEmpty()) {
+                HorizontalDivider(); Text("Patch preview", fontWeight = FontWeight.Bold)
+                r.edits.forEach { edit ->
+                    Text(edit.path, fontWeight = FontWeight.Bold)
+                    if (edit.reason.isNotBlank()) Text(edit.reason, style = MaterialTheme.typography.bodySmall)
+                    if (edit.content.isNotBlank()) {
+                        Text("New content", style = MaterialTheme.typography.labelMedium)
+                        Text(edit.content.take(1600), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
             if (r.tests.isNotEmpty()) { HorizontalDivider(); Text("Validation", fontWeight = FontWeight.Bold); r.tests.forEach { Text("• $it") } }
             if (r.ok && r.questions.isEmpty() && r.edits.isNotEmpty() && r.stage != "apply") {
                 OutlinedButton(onClick = onApply, enabled = !busy, Modifier.fillMaxWidth()) { Text("Apply approved patch") }
