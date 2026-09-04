@@ -1,3 +1,6 @@
+"""AI provider adapters and failover routing for XFI AI Gateway."""
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
@@ -9,7 +12,7 @@ from typing import Any
 import httpx
 
 from .metrics import provider_state, record
-
+from .model_manager import ModelManager, ModelProfile
 
 @dataclass(frozen=True)
 class Provider:
@@ -20,15 +23,10 @@ class Provider:
     default_model: str
     priority: int
     free: bool = False
-
     @property
-    def key(self) -> str:
-        return os.getenv(self.key_env, "")
-
+    def key(self) -> str: return os.getenv(self.key_env, "")
     @property
-    def model(self) -> str:
-        return os.getenv(self.model_env, self.default_model)
-
+    def model(self) -> str: return os.getenv(self.model_env, self.default_model)
 
 PROVIDERS = [
     Provider("groq", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "GROQ_MODEL", "openai/gpt-oss-120b", 1),
@@ -41,160 +39,112 @@ PROVIDERS = [
     Provider("huggingface", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN", "HF_MODEL", "openai/gpt-oss-120b:fastest", 8, True),
     Provider("cohere", "https://api.cohere.com/compatibility/v1/chat/completions", "COHERE_API_KEY", "COHERE_MODEL", "command-a-03-2025", 9),
 ]
-
 CAPABILITIES = {"ai", "support", "vpn", "code-agent", "diagnostics", "3x-ui", "phobos", "web-admin"}
 DETECT_MAX_PROVIDERS = len(PROVIDERS)
 DETECT_CONCURRENCY = 4
 _state: dict[str, dict[str, float]] = {}
-
+MODEL_MANAGER = ModelManager()
 
 def configured_providers() -> list[Provider]:
-    requested = [
-        x.strip().lower()
-        for x in os.getenv("XFI_AI_PROVIDERS", ",".join(p.name for p in PROVIDERS)).split(",")
-        if x.strip()
-    ]
+    requested = [x.strip().lower() for x in os.getenv("XFI_AI_PROVIDERS", ",".join(p.name for p in PROVIDERS)).split(",") if x.strip()]
     by_name = {p.name: p for p in PROVIDERS}
     return [by_name[x] for x in requested if x in by_name and by_name[x].key]
 
-
 def _capability_order(capability: str) -> list[str]:
-    if capability not in CAPABILITIES:
-        return []
-    raw = os.getenv(f"XFI_AI_{capability.upper().replace('-', '_')}_PROVIDERS", "")
-    return [x.strip().lower() for x in raw.split(",") if x.strip()]
-
+    if capability not in CAPABILITIES: return []
+    return [x.strip().lower() for x in os.getenv(f"XFI_AI_{capability.upper().replace('-', '_')}_PROVIDERS", "").split(",") if x.strip()]
 
 def _routing_score(p: Provider, preferred: list[str]) -> tuple[int, float]:
     position = preferred.index(p.name) if p.name in preferred else len(preferred)
     return position, _score(p)
-
 
 def _score(p: Provider) -> float:
     persisted = provider_state(p.name)
     s = persisted if persisted else _state.get(p.name, {})
     _state[p.name] = s
     cooldown = max(0.0, s.get("cooldown_until", 0) - time.time())
-    if cooldown:
-        return 10000 + cooldown
+    if cooldown: return 10000 + cooldown
     return p.priority + s.get("failures", 0) * 4 + min(s.get("latency", 1.0), 20) * 0.15
-
 
 def _record(p: Provider, ok: bool, latency: float, status: int | None = None) -> None:
     s = _state.setdefault(p.name, {})
     if ok:
-        s["failures"] = max(0, s.get("failures", 0) - 1)
-        s["latency"] = latency
-        s["cooldown_until"] = 0
+        s["failures"] = max(0, s.get("failures", 0) - 1); s["latency"] = latency; s["cooldown_until"] = 0
     else:
-        s["failures"] = s.get("failures", 0) + 1
-        if status in (401, 403):
-            s["cooldown_until"] = time.time() + 900
-        elif status == 429:
-            s["cooldown_until"] = time.time() + min(300, 15 * s["failures"])
-        elif status and status >= 500:
-            s["cooldown_until"] = time.time() + min(60, 5 * s["failures"])
+        s["failures"] = s.get("failures", 0) + 1; s["latency"] = latency
+        if status in (401, 403): s["cooldown_until"] = time.time() + 900
+        elif status == 429: s["cooldown_until"] = time.time() + min(300, 15 * s["failures"])
+        elif status and status >= 500: s["cooldown_until"] = time.time() + min(60, 5 * s["failures"])
     record(p.name, ok, latency * 1000, status or 599)
-
+    profile = ModelProfile(p.name, p.model, ("ai", "support", "code-agent", "diagnostics", "3x-ui", "phobos", "web-admin"), max(1, 100 - p.priority * 5))
+    MODEL_MANAGER.record(profile, ok, latency, status)
 
 def _url(p: Provider) -> str:
-    if p.name == "cloudflare":
-        account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
-        return p.url.format(account=account)
+    if p.name == "cloudflare": return p.url.format(account=os.getenv("CLOUDFLARE_ACCOUNT_ID", ""))
     return p.url
 
-
-def _key_fingerprint(key: str) -> str:
-    return hashlib.sha256(key.encode()).hexdigest()[:12]
-
+def _key_fingerprint(key: str) -> str: return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 async def test_provider_key(provider_name: str, key: str) -> dict[str, Any]:
     provider = next((p for p in PROVIDERS if p.name == provider_name.lower()), None)
-    if not provider:
-        return {"ok": False, "provider": provider_name, "error": "Unknown provider"}
-    if not key or len(key) > 1000:
-        return {"ok": False, "provider": provider.name, "error": "Invalid key input"}
-    if provider.name == "cloudflare" and not os.getenv("CLOUDFLARE_ACCOUNT_ID"):
-        return {"ok": False, "provider": provider.name, "error": "CLOUDFLARE_ACCOUNT_ID is required"}
-    payload = {"model": provider.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}
-    started = time.monotonic()
+    if not provider: return {"ok": False, "provider": provider_name, "error": "Unknown provider"}
+    if not key or len(key) > 1000: return {"ok": False, "provider": provider.name, "error": "Invalid key input"}
+    if provider.name == "cloudflare" and not os.getenv("CLOUDFLARE_ACCOUNT_ID"): return {"ok": False, "provider": provider.name, "error": "CLOUDFLARE_ACCOUNT_ID is required"}
+    payload = {"model": provider.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}; started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-            response = await client.post(
-                _url(provider),
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-        latency_ms = round((time.monotonic() - started) * 1000, 1)
-        ok = response.status_code < 400
+            response = await client.post(_url(provider), headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, json=payload)
+        latency_ms = round((time.monotonic() - started) * 1000, 1); ok = response.status_code < 400
         result = {"ok": ok, "provider": provider.name, "model": provider.model, "status": response.status_code, "latency_ms": latency_ms, "fingerprint": _key_fingerprint(key)}
-        if not ok:
-            result["error"] = "Provider rejected the key or request"
+        if not ok: result["error"] = "Provider rejected the key or request"
         return result
     except httpx.HTTPError as exc:
         return {"ok": False, "provider": provider.name, "model": provider.model, "latency_ms": round((time.monotonic() - started) * 1000, 1), "fingerprint": _key_fingerprint(key), "error": type(exc).__name__}
 
-
 async def detect_provider_key(key: str) -> list[dict[str, Any]]:
-    if not key or len(key) > 1000:
-        return []
+    if not key or len(key) > 1000: return []
     semaphore = asyncio.Semaphore(DETECT_CONCURRENCY)
-
     async def check(provider: Provider) -> dict[str, Any]:
-        async with semaphore:
-            return await test_provider_key(provider.name, key)
-
+        async with semaphore: return await test_provider_key(provider.name, key)
     candidates = sorted(PROVIDERS, key=lambda p: p.priority)[:DETECT_MAX_PROVIDERS]
     results = await asyncio.gather(*(check(provider) for provider in candidates))
     return [result for result in results if result.get("ok") or result.get("status") in (401, 403, 429)]
 
-
 async def complete(body: bytes) -> tuple[httpx.Response, str]:
-    try:
-        payload: dict[str, Any] = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("Invalid JSON request body") from exc
-    if not isinstance(payload, dict):
-        raise TypeError("JSON request body must be an object")
-
+    try: payload: dict[str, Any] = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc: raise ValueError("Invalid JSON request body") from exc
+    if not isinstance(payload, dict): raise TypeError("JSON request body must be an object")
     capability = str(payload.pop("xfi_capability", "ai")).strip().lower()
-    if capability not in CAPABILITIES:
-        raise ValueError("Unsupported XFI capability")
+    if capability not in CAPABILITIES: raise ValueError("Unsupported XFI capability")
     preferred = _capability_order(capability)
-    providers = sorted(configured_providers(), key=lambda p: _routing_score(p, preferred))
-    if not providers:
-        raise RuntimeError("No AI providers are configured")
-
-    last_error: Exception | None = None
-    last_response: httpx.Response | None = None
-    last_provider: str | None = None
+    configured = configured_providers()
+    profiles = tuple(ModelProfile(p.name, p.model, ("ai", "support", "code-agent", "diagnostics", "3x-ui", "phobos", "web-admin"), max(1, 100 - p.priority * 5)) for p in configured)
+    MODEL_MANAGER.profiles = profiles
+    requested_model = str(payload.get("model", "")).strip() or None
+    candidates = MODEL_MANAGER.candidates(capability, requested_model)
+    if requested_model and not candidates:
+        candidates = MODEL_MANAGER.candidates(capability)
+    by_name = {p.name: p for p in configured}
+    providers = [by_name[p.provider] for p in candidates if p.provider in by_name]
+    if preferred:
+        providers.sort(key=lambda p: _routing_score(p, preferred))
+    else:
+        providers.sort(key=_score)
+    if not providers: raise RuntimeError("No AI providers are configured")
+    last_error: Exception | None = None; last_response: httpx.Response | None = None; last_provider: str | None = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
         for provider in providers:
             started = time.monotonic()
             try:
-                request_payload = dict(payload)
-                request_payload["model"] = provider.model
-                response = await client.post(
-                    _url(provider),
-                    headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"},
-                    json=request_payload,
-                )
-                latency = time.monotonic() - started
-                last_response = response
-                last_provider = provider.name
+                request_payload = dict(payload); request_payload["model"] = provider.model
+                response = await client.post(_url(provider), headers={"Authorization": f"Bearer {provider.key}", "Content-Type": "application/json"}, json=request_payload)
+                latency = time.monotonic() - started; last_response = response; last_provider = provider.name
                 if response.status_code < 400:
-                    _record(provider, True, latency, response.status_code)
-                    return response, provider.name
-                if response.status_code not in (400, 401, 403, 408, 409, 429, 500, 502, 503, 504):
-                    return response, provider.name
+                    _record(provider, True, latency, response.status_code); return response, provider.name
+                if response.status_code not in (400, 401, 403, 408, 409, 429, 500, 502, 503, 504): return response, provider.name
                 _record(provider, False, latency, response.status_code)
             except (httpx.HTTPError, ValueError) as exc:
-                latency = time.monotonic() - started
-                _record(provider, False, latency)
-                last_error = exc
-                last_provider = provider.name
-    if last_response is not None and last_provider is not None:
-        return last_response, last_provider
-    if last_error:
-        raise last_error
+                latency = time.monotonic() - started; _record(provider, False, latency); last_error = exc; last_provider = provider.name
+    if last_response is not None and last_provider is not None: return last_response, last_provider
+    if last_error: raise last_error
     raise RuntimeError("No AI providers are available")
