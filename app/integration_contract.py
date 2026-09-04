@@ -13,10 +13,12 @@ def contract() -> dict[str, object]:
             "health": "/health",
             "models": "/v1/models",
             "chat_completions": "/v1/chat/completions",
+            "integration_registration": "/v1/integrations/register",
         },
         "integration": {
             "status": "configured | unavailable",
             "health": "self-reported",
+            "registration": "bootstrap token -> dedicated xfi_ client key",
             "secrets": "never returned",
         },
         "capabilities": {
