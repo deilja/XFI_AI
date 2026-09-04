@@ -1,6 +1,6 @@
 import pytest
-from fastapi import HTTPException
 from starlette.requests import Request
+from fastapi import HTTPException
 
 import app.project_api as project_api
 
@@ -31,9 +31,14 @@ def _auth_ok(*_args, **_kwargs):
     return None
 
 
+def _audit_noop(*_args, **_kwargs):
+    return None
+
+
 @pytest.mark.asyncio
 async def test_analyze_to_generate_contract(monkeypatch):
     monkeypatch.setattr(project_api, "_auth", _auth_ok)
+    monkeypatch.setattr(project_api, "record", _audit_noop)
     analysis = {
         "ready": True,
         "questions": [],
@@ -68,6 +73,7 @@ async def test_analyze_to_generate_contract(monkeypatch):
 @pytest.mark.asyncio
 async def test_customize_without_confirm_is_preview_only(monkeypatch):
     monkeypatch.setattr(project_api, "_auth", _auth_ok)
+    monkeypatch.setattr(project_api, "record", _audit_noop)
     analysis = {"ready": True, "questions": [], "summary": "preview", "files": ["app.py"], "architecture": {"node_count": 1, "edge_count": 0}}
     patch = {"summary": "preview", "edits": [{"path": "app.py", "reason": "test", "content": "x", "expected_sha256": "sha"}], "tests": []}
     applied = False
@@ -86,6 +92,7 @@ async def test_customize_without_confirm_is_preview_only(monkeypatch):
     monkeypatch.setattr(project_api, "analyze", fake_analyze)
     monkeypatch.setattr(project_api, "generate_edits", fake_generate)
     monkeypatch.setattr(project_api, "apply_edits_async", fail_apply)
+
     result = await project_api.project_customize("connect", _request({"request": "preview", "confirm": False}), None, None)
 
     assert result["stage"] == "preview"
@@ -106,6 +113,7 @@ async def test_apply_requires_explicit_confirmation(monkeypatch):
 @pytest.mark.asyncio
 async def test_customize_confirmed_apply_records_result(monkeypatch):
     monkeypatch.setattr(project_api, "_auth", _auth_ok)
+    monkeypatch.setattr(project_api, "record", _audit_noop)
     analysis = {"ready": True, "questions": [], "summary": "apply", "files": ["app.py"], "architecture": {"node_count": 1, "edge_count": 0}}
     patch = {"summary": "apply", "edits": [{"path": "app.py", "reason": "test", "content": "x", "expected_sha256": "sha"}], "tests": []}
     applied = {"ok": True, "project": "connect", "backup": "/backup/test", "changed": ["app.py"], "service": "xfi-connect"}
