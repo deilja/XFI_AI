@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="420" viewBox="0 0 1400 420">
+<defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#111827"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs>
+<rect width="1400" height="420" rx="28" fill="url(#g)"/>
+<circle cx="1130" cy="90" r="150" fill="#60a5fa" opacity=".10"/><circle cx="1240" cy="310" r="210" fill="#a78bfa" opacity=".10"/>
+<text x="80" y="145" fill="white" font-family="Inter,Arial,sans-serif" font-size="64" font-weight="800">XFI AI</text>
+<text x="80" y="205" fill="#dbeafe" font-family="Inter,Arial,sans-serif" font-size="30">AI Gateway &amp; Control Plane</text>
+<text x="80" y="255" fill="#bfdbfe" font-family="Inter,Arial,sans-serif" font-size="21">Единый API • provider routing • failover • Web Admin</text>
+<text x="80" y="292" fill="#bfdbfe" font-family="Inter,Arial,sans-serif" font-size="21">VPS Control Center • Telegram Code Agent • CI/CD</text>
+<g transform="translate(930 95)"><rect width="330" height="190" rx="24" fill="#0f172a" stroke="#60a5fa" stroke-width="2"/><text x="165" y="52" text-anchor="middle" fill="#93c5fd" font-family="Inter,Arial" font-size="18">XFI GATEWAY</text><text x="165" y="91" text-anchor="middle" fill="white" font-family="Inter,Arial" font-size="28" font-weight="700">xfi_••••••••</text><text x="165" y="130" text-anchor="middle" fill="#cbd5e1" font-family="Inter,Arial" font-size="17">Groq · Gemini · Mistral</text><text x="165" y="157" text-anchor="middle" fill="#cbd5e1" font-family="Inter,Arial" font-size="17">OpenRouter · Cloudflare · +</text></g>
+</svg>
