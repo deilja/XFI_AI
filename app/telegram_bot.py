@@ -8,7 +8,12 @@ import httpx
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 
-from .code_agent import analyze_request, create_branch_and_commit, generate_edits, wait_for_ci
+from .code_agent import (
+    analyze_request,
+    create_branch_and_commit,
+    generate_edits,
+    wait_for_ci,
+)
 from .key_store import create_key
 
 router = Router()
