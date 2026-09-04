@@ -4,7 +4,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 
 class SessionExpiredException(message: String = "XFI AI admin session expired") : IllegalStateException(message)
 
@@ -15,7 +14,7 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
 
     private fun projectPath(project: String): String {
         require(project == "connect" || project == "webapp") { "Unsupported project" }
-        return URLEncoder.encode(project, Charsets.UTF_8).replace("+", "%20")
+        return project
     }
 
     private fun connection(path: String, method: String): HttpURLConnection =
@@ -35,12 +34,13 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
         connection.outputStream.use { it.write(JSONObject().put("key", adminKey).toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
         val cookie = connection.headerFields.entries
-            .filter { it.key.equals("Set-Cookie", ignoreCase = true) }
+            .firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }
+            ?.value.orEmpty()
             .asSequence()
-            .flatMap { it.value.orEmpty().asSequence() }
             .map { it.substringBefore(';') }
-            .mapNotNull { value -> value.removePrefix("xfi_admin_session=").takeIf { it.isNotBlank() && it != value } }
-            .firstOrNull()
+            .firstNotNullOfOrNull { value ->
+                value.removePrefix("xfi_admin_session=").takeIf { it.isNotBlank() && it != value }
+            }
         val text = readText(connection, code)
         if (code !in 200..299) throw IllegalStateException("Login failed ($code): ${errorMessage(text)}")
         return cookie ?: throw IllegalStateException("XFI AI did not return an admin session")
@@ -75,56 +75,32 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
     fun analyze(project: String, request: String): AiResult {
         require(request.isNotBlank()) { "Request is required" }
         val connection = connection("/admin/projects/${projectPath(project)}/analyze", "POST").jsonRequest()
-        return parseResult(connection, requestBody(request))
+        return parseResult(connection, JSONObject().put("request", request))
     }
 
     fun generate(project: String, request: String, answers: List<Answer> = emptyList()): AiResult {
         require(request.isNotBlank()) { "Request is required" }
         val connection = connection("/admin/projects/${projectPath(project)}/generate", "POST").jsonRequest()
-        val body = JSONObject().put("request", request).put("answers", answers.toJson())
-        return parseResult(connection, body)
+        return parseResult(connection, JSONObject().put("request", request).put("answers", answers.toJson()))
     }
 
     fun apply(project: String, edits: List<EditPreview>, restart: Boolean = true): AiResult {
         require(edits.isNotEmpty()) { "No patch to apply" }
         val connection = connection("/admin/projects/${projectPath(project)}/apply", "POST").jsonRequest()
         val payload = JSONArray().apply {
-            edits.forEach { edit ->
-                put(JSONObject()
-                    .put("path", edit.path)
-                    .put("content", edit.content)
-                    .put("reason", edit.reason)
-                    .put("expected_sha256", edit.expectedSha256))
-            }
+            edits.forEach { edit -> put(JSONObject().put("path", edit.path).put("content", edit.content).put("reason", edit.reason).put("expected_sha256", edit.expectedSha256)) }
         }
-        val body = JSONObject().put("confirm", true).put("restart", restart).put("edits", payload)
-        return parseResult(connection, body)
+        return parseResult(connection, JSONObject().put("confirm", true).put("restart", restart).put("edits", payload))
     }
 
-    fun audit(project: String? = null): List<String> {
-        val path = if (project == null) "/admin/projects/audit/all" else "/admin/projects/${projectPath(project)}/audit"
-        val connection = connection(path, "GET")
+    fun audit(project: String): List<String> {
+        val connection = connection("/admin/projects/${projectPath(project)}/audit", "GET")
         val code = connection.responseCode
         val text = readText(connection, code)
         checkResponse(code, text)
-        val json = JSONObject(text)
-        val array = json.optJSONArray("audit") ?: JSONArray()
-        return buildList {
-            for (i in 0 until array.length()) {
-                val item = array.optJSONObject(i)
-                if (item != null) add(item.toString()) else add(array.optString(i))
-            }
-        }
+        val array = JSONObject(text).optJSONArray("audit") ?: JSONArray()
+        return buildList { for (i in 0 until array.length()) add(array.optJSONObject(i)?.toString() ?: array.optString(i)) }
     }
-
-    fun customize(project: String, request: String, confirm: Boolean = false): AiResult {
-        require(request.isNotBlank()) { "Request is required" }
-        val connection = connection("/admin/projects/${projectPath(project)}/customize", "POST").jsonRequest()
-        val body = requestBody(request).put("confirm", confirm).put("restart", true)
-        return parseResult(connection, body)
-    }
-
-    private fun requestBody(request: String) = JSONObject().put("request", request)
 
     private fun HttpURLConnection.jsonRequest(): HttpURLConnection = apply {
         doOutput = true
@@ -174,9 +150,5 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
         }
     }
 
-    private fun List<Answer>.toJson() = JSONArray().apply {
-        forEach { put(JSONObject().put("question", it.question).put("answer", it.answer)) }
-    }
+    private fun List<Answer>.toJson() = JSONArray().apply { forEach { put(JSONObject().put("question", it.question).put("answer", it.answer)) } }
 }
-
-data class Answer(val question: String, val answer: String)
