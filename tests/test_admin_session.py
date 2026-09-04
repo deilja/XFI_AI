@@ -22,6 +22,7 @@ def test_admin_session_sets_httponly_cookie(client):
     assert response.cookies.get("xfi_admin_session")
     assert "x-xfi-admin-session" not in {k.lower() for k in response.headers.keys()}
     assert "httponly" in response.headers.get("set-cookie", "").lower()
+    assert "secure" in response.headers.get("set-cookie", "").lower()
     assert response.json()["expires_in"] == 900
 
 
