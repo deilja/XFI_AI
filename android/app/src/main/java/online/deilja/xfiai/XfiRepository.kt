@@ -15,10 +15,10 @@ class XfiRepository(context: Context) {
 
     fun session(): String? = store.loadSession()
 
-    fun logout() = store.clearSession()
-
-    fun client(endpoint: String): XfiAiClient? {
-        val session = store.loadSession() ?: return null
-        return XfiAiClient(endpoint, session)
+    suspend fun logout(endpoint: String) = withContext(Dispatchers.IO) {
+        store.loadSession()?.let { runCatching { XfiAiClient(endpoint, it).logout() } }
+        store.clearSession()
     }
+
+    fun client(endpoint: String): XfiAiClient? = store.loadSession()?.let { XfiAiClient(endpoint, it) }
 }
