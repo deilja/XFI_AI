@@ -67,7 +67,9 @@ async def test_analyze_to_generate_contract(monkeypatch):
 
     assert analyzed["ready"] is True
     assert analyzed["files"] == ["app.py"]
+    assert analyzed["architecture"] == {"node_count": 2, "edge_count": 1}
     assert generated["edits"][0]["expected_sha256"] == "abc"
+    assert generated["tests"] == ["python -m py_compile app.py"]
 
 
 @pytest.mark.asyncio
@@ -108,6 +110,44 @@ async def test_apply_requires_explicit_confirmation(monkeypatch):
         await project_api.project_apply("connect", _request({"edits": []}), None, None)
 
     assert exc.value.status_code == 428
+
+
+@pytest.mark.asyncio
+async def test_apply_response_matches_android_contract(monkeypatch):
+    monkeypatch.setattr(project_api, "_auth", _auth_ok)
+    monkeypatch.setattr(project_api, "record", _audit_noop)
+    applied = {
+        "ok": True,
+        "project": "connect",
+        "backup": "/backup/test",
+        "changed": ["app.py"],
+        "service": "xfi-connect",
+        "validation": {"ok": True, "tests": ["python -m py_compile app.py"]},
+    }
+
+    async def fake_apply(*args, **kwargs):
+        assert kwargs["restart"] is False
+        return applied
+
+    monkeypatch.setattr(project_api, "apply_edits_async", fake_apply)
+    result = await project_api.project_apply(
+        "connect",
+        _request(
+            {
+                "confirm": True,
+                "restart": False,
+                "edits": [{"path": "app.py", "content": "x", "reason": "test", "expected_sha256": "sha"}],
+            }
+        ),
+        None,
+        None,
+    )
+
+    assert result["ok"] is True
+    assert result["project"] == "connect"
+    assert result["changed"] == ["app.py"]
+    assert result["backup"] == "/backup/test"
+    assert result["validation"]["ok"] is True
 
 
 @pytest.mark.asyncio
