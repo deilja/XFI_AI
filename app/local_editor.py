@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import py_compile
 import re
 import secrets
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fixed local commands only
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ BACKUP_ROOT = Path(os.getenv("XFI_AI_BACKUP_DIR", "/var/lib/xfi-ai/backups"))
 PROJECT_ROOT = Path(os.getenv("XFI_CONNECT_PATH", "/root/XFI_CONNECT")).resolve()
 SERVICE = os.getenv("XFI_CONNECT_SERVICE", "xfi-connect").strip() or "xfi-connect"
 LOCK_PATH = Path(os.getenv("XFI_AI_EDIT_LOCK", "/run/lock/xfi-ai-connect-edit.lock"))
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты изменяешь установленный XFI_CONNECT непосредственно на VPS.
 Сначала проанализируй структуру и запрос. Не придумывай файлы/API. Не меняй секреты.
@@ -162,7 +164,7 @@ class _FileLock:
 
 
 def _run(args: list[str], timeout: int) -> tuple[int, str]:
-    proc = subprocess.run(args, cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)
+    proc = subprocess.run(args, cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)  # nosec B603 - fixed command argv; shell=False
     return proc.returncode, proc.stdout[-12000:]
 
 
@@ -212,8 +214,8 @@ def apply_local_edits(edits: list[dict[str, str]], restart: bool = True) -> dict
             if restart:
                 try:
                     _run(["systemctl", "restart", SERVICE], 20)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to restart service during rollback: %s", exc)
             raise
 
 
