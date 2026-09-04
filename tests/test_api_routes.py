@@ -3,16 +3,8 @@ from fastapi.routing import APIRoute
 from app.api import app
 
 
-def _paths(routes=None):
-    routes = app.routes if routes is None else routes
-    paths = set()
-    for route in routes:
-        if isinstance(route, APIRoute):
-            paths.add(route.path)
-        nested = getattr(route, "routes", None)
-        if nested:
-            paths.update(_paths(nested))
-    return paths
+def _paths():
+    return set(app.openapi()["paths"])
 
 
 def test_independent_admin_routes_are_mounted_once():
