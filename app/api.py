@@ -22,6 +22,7 @@ from .metrics import snapshot
 from .phobos_api import router as phobos_router
 from .provider_registry import providers as vpn_providers
 from .providers import complete, configured_providers, detect_provider_key, test_provider_key
+from .project_api import router as project_router
 from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_restart
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
@@ -34,6 +35,7 @@ PROVIDER_DETECT_COOLDOWN = 10.0
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
 app.include_router(phobos_router)
+app.include_router(project_router)
 ALLOWED_SERVICES = {"x-ui", "3x-ui", "xray", "nginx", "docker"}
 OPENCLAW_ALLOWED = {
     "status": ["openclaw", "gateway", "status"],
@@ -418,18 +420,11 @@ async def chat_completions(request: Request, authorization: str | None = Header(
     except (ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502, "AI provider unavailable") from exc
-    except Exception as exc:
-        raise HTTPException(503, "AI provider unavailable") from exc
-    if response.status_code >= 400:
-        return JSONResponse({"error": {"message": "AI provider request failed", "type": "upstream_error", "code": "upstream_http_error"}}, status_code=502, headers={"X-XFI-AI-Provider": provider})
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise HTTPException(502, "AI provider returned invalid JSON") from exc
-    return JSONResponse(payload, headers={"X-XFI-AI-Provider": provider})
+        raise HTTPException(502, "Provider request failed") from exc
+    response.headers["X-XFI-Provider"] = provider
+    return response
 
 
 @app.get("/")
-async def site():
+async def index():
     return FileResponse(WEB_DIR / "index.html")
