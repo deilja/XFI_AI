@@ -1,6 +1,7 @@
 import pytest
 
-from app.phobos_adapter import PhobosAdapter, PhobosConfig
+from app.phobos_adapter import PhobosAdapter, PhobosConfig, get_config
+from app.phobos_api import router
 from app.provider_registry import providers
 
 
@@ -10,12 +11,17 @@ def test_phobos_provider_registered():
     assert item["project"] == "Phobos"
 
 
-def test_phobos_requires_token(monkeypatch):
-    monkeypatch.delenv("XFI_PHOBOS_API_TOKEN", raising=False)
+def test_phobos_requires_credentials(monkeypatch):
+    monkeypatch.delenv("XFI_PHOBOS_USERNAME", raising=False)
+    monkeypatch.delenv("XFI_PHOBOS_PASSWORD", raising=False)
     with pytest.raises(RuntimeError):
-        PhobosAdapter()
+        get_config()
 
 
 def test_phobos_url_is_validated():
     with pytest.raises(ValueError):
-        PhobosAdapter(PhobosConfig("ftp://localhost", "token"))
+        PhobosAdapter(PhobosConfig("ftp://localhost", "user", "pass"))
+
+
+def test_phobos_admin_router_is_protected():
+    assert any(getattr(dep.call, "__name__", "") == "require_phobos_admin" for dep in router.dependencies)
