@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from .project_graph import build_graph, graph_context
 from .providers import complete
+from . import project_helper_client
 
 MAX_FILE_BYTES = 120_000
 MAX_FILES = 8
@@ -200,6 +201,8 @@ def _health(cfg: dict[str, str]) -> None:
 def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True) -> dict[str, Any]:
     if not edits or len(edits) > MAX_FILES:
         raise ValueError("Invalid edit set")
+    if project_helper_client.enabled():
+        return project_helper_client.apply(project, edits, restart)
     cfg = project_config(project)
     lock = Path(os.getenv(f"XFI_AI_{project.upper()}_EDIT_LOCK", f"/run/lock/xfi-ai-{project}-edit.lock"))
     backup_root = Path(os.getenv("XFI_AI_BACKUP_DIR", "/var/lib/xfi-ai/backups")) / project
