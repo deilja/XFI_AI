@@ -16,11 +16,12 @@ def client(monkeypatch, tmp_path):
     return TestClient(api.app)
 
 
-def test_admin_session_returns_short_lived_token(client):
+def test_admin_session_sets_httponly_cookie(client):
     response = client.post("/admin/session", json={"key": "test-admin-key"})
     assert response.status_code == 200
     assert response.cookies.get("xfi_admin_session")
-    assert response.headers.get("X-XFI-Admin-Session")
+    assert "x-xfi-admin-session" not in {k.lower() for k in response.headers.keys()}
+    assert "httponly" in response.headers.get("set-cookie", "").lower()
     assert response.json()["expires_in"] == 900
 
 
@@ -29,17 +30,21 @@ def test_admin_session_rejects_invalid_key(client):
     assert response.status_code == 403
 
 
-def test_admin_endpoint_accepts_session_token(client):
+def test_admin_endpoint_accepts_httponly_session_cookie(client):
     login = client.post("/admin/session", json={"key": "test-admin-key"})
-    token = login.headers["X-XFI-Admin-Session"]
-    response = client.get("/admin/providers", headers={"X-Admin-Session": token})
+    assert login.status_code == 200
+    response = client.get("/admin/providers")
     assert response.status_code == 200
 
 
+def test_admin_endpoint_rejects_forged_legacy_header(client):
+    response = client.get("/admin/providers", headers={"X-Admin-Session": "forged"})
+    assert response.status_code == 403
+
+
 def test_expired_admin_session_is_rejected(client, monkeypatch):
-    login = client.post("/admin/session", json={"key": "test-admin-key"})
-    token = login.headers["X-XFI-Admin-Session"]
+    client.post("/admin/session", json={"key": "test-admin-key"})
     original_time = time.time
     monkeypatch.setattr("app.api.time.time", lambda: original_time() + 901)
-    response = client.get("/admin/providers", headers={"X-Admin-Session": token})
+    response = client.get("/admin/providers")
     assert response.status_code == 403
