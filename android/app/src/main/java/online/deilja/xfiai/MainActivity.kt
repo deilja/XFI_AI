@@ -3,9 +3,7 @@ package online.deilja.xfiai
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,9 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -30,12 +26,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,22 +42,45 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { XfiAiApp() }
+        setContent { XfiAiApp(XfiSecureStore(this)) }
     }
 }
 
 private enum class Screen { Dashboard, Agent, Projects, Settings }
 
 @Composable
-private fun XfiAiApp() {
+private fun XfiAiApp(store: XfiSecureStore) {
     var screen by remember { mutableStateOf(Screen.Dashboard) }
     var project by remember { mutableStateOf("connect") }
     var request by remember { mutableStateOf("") }
     var endpoint by remember { mutableStateOf("") }
-    var token by remember { mutableStateOf("") }
+    var adminKey by remember { mutableStateOf("") }
+    var session by remember { mutableStateOf<String?>(store.loadSession()) }
+    var dashboard by remember { mutableStateOf<DashboardStatus?>(null) }
+    var projectStatus by remember { mutableStateOf<ProjectStatus?>(null) }
     var result by remember { mutableStateOf<AiResult?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+
+    fun api(): XfiAiClient? = if (endpoint.isBlank() || session.isNullOrBlank()) null else XfiAiClient(endpoint, session)
+
+    fun refresh() {
+        val client = api() ?: return
+        busy = true
+        scope.launch(Dispatchers.IO) {
+            val outcome = runCatching {
+                dashboard = client.dashboard()
+                projectStatus = client.projectStatus(project)
+            }
+            withContext(Dispatchers.Main) {
+                message = outcome.exceptionOrNull()?.message
+                busy = false
+            }
+        }
+    }
+
+    LaunchedEffect(project, session, endpoint) { if (session != null && endpoint.isNotBlank()) refresh() }
 
     MaterialTheme {
         Scaffold(
@@ -77,29 +96,54 @@ private fun XfiAiApp() {
         ) { padding ->
             Surface(Modifier.fillMaxSize().padding(padding)) {
                 when (screen) {
-                    Screen.Dashboard -> Dashboard(project) { screen = Screen.Agent }
+                    Screen.Dashboard -> Dashboard(dashboard, projectStatus, session != null, busy, message) { screen = Screen.Agent }
                     Screen.Agent -> Agent(
                         project, { project = it }, request, { request = it }, result, busy,
+                        authenticated = session != null,
                         onAnalyze = {
-                            if (endpoint.isBlank() || request.isBlank()) return@Agent
+                            val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
                             scope.launch(Dispatchers.IO) {
-                                val r = runCatching { XfiAiClient(endpoint, token).customize(project, request) }
+                                val r = runCatching { client.customize(project, request) }
                                     .getOrElse { AiResult(false, it.message ?: "Connection failed") }
-                                withContext(Dispatchers.Main) { result = r; busy = false }
+                                withContext(Dispatchers.Main) { result = r; message = null; busy = false }
                             }
-                        }, onApply = {
-                            if (endpoint.isBlank() || request.isBlank()) return@Agent
+                        },
+                        onApply = {
+                            val client = api() ?: run { message = "Connect to XFI AI in Settings first"; return@Agent }
                             busy = true
                             scope.launch(Dispatchers.IO) {
-                                val r = runCatching { XfiAiClient(endpoint, token).customize(project, request, true) }
+                                val r = runCatching { client.customize(project, request, true) }
                                     .getOrElse { AiResult(false, it.message ?: "Apply failed") }
-                                withContext(Dispatchers.Main) { result = r; busy = false }
+                                withContext(Dispatchers.Main) { result = r; message = null; busy = false; refresh() }
                             }
                         }
                     )
                     Screen.Projects -> Projects(project) { project = it }
-                    Screen.Settings -> Settings(endpoint, { endpoint = it }, token, { token = it })
+                    Screen.Settings -> Settings(
+                        endpoint, { endpoint = it }, adminKey, { adminKey = it }, session != null,
+                        onLogin = {
+                            if (endpoint.isBlank() || adminKey.isBlank()) { message = "Enter XFI AI URL and admin key"; return@Settings }
+                            busy = true
+                            scope.launch(Dispatchers.IO) {
+                                val r = runCatching { XfiAiClient(endpoint).login(adminKey) }
+                                withContext(Dispatchers.Main) {
+                                    r.onSuccess {
+                                        store.saveSession(it)
+                                        session = it
+                                        adminKey = ""
+                                        message = "Connected"
+                                    }.onFailure { message = it.message ?: "Login failed" }
+                                    busy = false
+                                }
+                            }
+                        },
+                        onLogout = {
+                            store.clearSession(); session = null; dashboard = null; projectStatus = null; message = "Disconnected"
+                        },
+                        busy = busy,
+                        message = message
+                    )
                 }
             }
         }
@@ -112,25 +156,40 @@ private fun NavButton(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Dashboard(project: String, openAgent: () -> Unit) {
+private fun Dashboard(
+    dashboard: DashboardStatus?, status: ProjectStatus?, connected: Boolean, busy: Boolean, message: String?, openAgent: () -> Unit
+) {
     LazyColumn(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Command center", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
-        item { Text("Control XFI projects through natural language.", style = MaterialTheme.typography.bodyLarge) }
+        item { Text(if (connected) "Secure admin session active." else "Connect the Android client to XFI AI from Settings.") }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatusCard("XFI AI", "READY", Modifier.weight(1f))
-                StatusCard("Project", if (project == "connect") "CONNECT" else "WEBAPP", Modifier.weight(1f))
+                StatusCard("XFI AI", if (connected) "CONNECTED" else "OFFLINE", Modifier.weight(1f))
+                StatusCard("Project", if (status?.online == true) "ONLINE" else "—", Modifier.weight(1f))
             }
         }
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("AI Code Agent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("Describe a customization. XFI AI analyzes the architecture, prepares a minimal patch and waits for confirmation.")
-                    Button(onClick = openAgent, Modifier.fillMaxWidth()) { Text("Open Agent") }
+                    Text("Natural-language changes go through architecture analysis, preview, explicit confirmation and the guarded server-side edit pipeline.")
+                    Button(onClick = openAgent, enabled = connected, Modifier.fillMaxWidth()) { Text("Open Agent") }
                 }
             }
         }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("System", fontWeight = FontWeight.Bold)
+                    Text("Integrations: ${dashboard?.integrationsReady ?: 0}/${dashboard?.integrationsTotal ?: 0}")
+                    Text("AI providers: ${dashboard?.providersConfigured ?: 0}")
+                    Text("Protocol: ${dashboard?.protocolVersion ?: "—"}")
+                    Text("${status?.name ?: "Project"}: ${status?.detail ?: "not loaded"}")
+                    message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+        }
+        item { if (busy) Text("Updating…") }
     }
 }
 
@@ -151,8 +210,8 @@ private fun Projects(selected: String, choose: (String) -> Unit) {
 
 @Composable
 private fun ProjectCard(id: String, name: String, description: String, selected: Boolean, choose: (String) -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
+        Row(Modifier.padding(16.dp)) {
             Column(Modifier.weight(1f)) { Text(name, fontWeight = FontWeight.Bold); Text(description) }
             FilterChip(selected, onClick = { choose(id) }, label = { Text(if (selected) "Active" else "Select") })
         }
@@ -162,7 +221,7 @@ private fun ProjectCard(id: String, name: String, description: String, selected:
 @Composable
 private fun Agent(
     project: String, chooseProject: (String) -> Unit, request: String, setRequest: (String) -> Unit,
-    result: AiResult?, busy: Boolean, onAnalyze: () -> Unit, onApply: () -> Unit
+    result: AiResult?, busy: Boolean, authenticated: Boolean, onAnalyze: () -> Unit, onApply: () -> Unit
 ) {
     LazyColumn(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("AI Code Agent", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
@@ -180,7 +239,7 @@ private fun Agent(
             )
         }
         item {
-            Button(onClick = onAnalyze, enabled = !busy && request.isNotBlank(), Modifier.fillMaxWidth()) {
+            Button(onClick = onAnalyze, enabled = authenticated && !busy && request.isNotBlank(), Modifier.fillMaxWidth()) {
                 Text(if (busy) "Working…" else "Analyze & Preview")
             }
         }
@@ -188,11 +247,17 @@ private fun Agent(
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if (r.ok) "Preview ready" else "Request failed", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(if (r.ok) "Preview / result" else "Request failed", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                         Text(r.summary)
                         if (r.questions.isNotEmpty()) { HorizontalDivider(); Text("Questions", fontWeight = FontWeight.Bold); r.questions.forEach { Text("• $it") } }
-                        if (r.files.isNotEmpty()) { HorizontalDivider(); Text("Affected files", fontWeight = FontWeight.Bold); r.files.forEach { Text("• $it") } }
-                        if (r.ok && r.questions.isEmpty()) {
+                        if (r.edits.isNotEmpty()) {
+                            HorizontalDivider(); Text("Patch preview", fontWeight = FontWeight.Bold)
+                            r.edits.forEach { edit -> Text(edit.path, fontWeight = FontWeight.Bold); if (edit.reason.isNotBlank()) Text(edit.reason, style = MaterialTheme.typography.bodySmall) }
+                        } else if (r.files.isNotEmpty()) {
+                            HorizontalDivider(); Text("Affected files", fontWeight = FontWeight.Bold); r.files.forEach { Text("• $it") }
+                        }
+                        if (r.tests.isNotEmpty()) { HorizontalDivider(); Text("Validation", fontWeight = FontWeight.Bold); r.tests.forEach { Text("• $it") } }
+                        if (r.ok && r.questions.isEmpty() && r.edits.isNotEmpty()) {
                             OutlinedButton(onClick = onApply, enabled = !busy, Modifier.fillMaxWidth()) { Text("Apply approved patch") }
                         }
                     }
@@ -203,12 +268,22 @@ private fun Agent(
 }
 
 @Composable
-private fun Settings(endpoint: String, setEndpoint: (String) -> Unit, token: String, setToken: (String) -> Unit) {
+private fun Settings(
+    endpoint: String, setEndpoint: (String) -> Unit, adminKey: String, setAdminKey: (String) -> Unit,
+    connected: Boolean, onLogin: () -> Unit, onLogout: () -> Unit, busy: Boolean, message: String?
+) {
     Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("Connection", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text("The Android client talks only to XFI AI. Keep the API endpoint on HTTPS.")
-        OutlinedTextField(endpoint, setEndpoint, Modifier.fillMaxWidth(), label = { Text("XFI AI URL") }, placeholder = { Text("https://ai.example.com") })
-        OutlinedTextField(token, setToken, Modifier.fillMaxWidth(), label = { Text("XFI AI token") })
-        Text("Token storage will use Android Keystore in the production build.", style = MaterialTheme.typography.bodySmall)
+        Text("Secure connection", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("The app uses the existing XFI AI admin session API. The admin key is used only to obtain a short-lived session and is never persisted.")
+        OutlinedTextField(endpoint, setEndpoint, Modifier.fillMaxWidth(), label = { Text("XFI AI HTTPS URL") }, placeholder = { Text("https://ai.example.com") })
+        if (!connected) {
+            OutlinedTextField(adminKey, setAdminKey, Modifier.fillMaxWidth(), label = { Text("Admin key") })
+            Button(onClick = onLogin, enabled = !busy, Modifier.fillMaxWidth()) { Text(if (busy) "Connecting…" else "Connect securely") }
+        } else {
+            Text("Admin session active", fontWeight = FontWeight.Bold)
+            OutlinedButton(onClick = onLogout, enabled = !busy, Modifier.fillMaxWidth()) { Text("Disconnect") }
+        }
+        message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        Text("Session is encrypted with Android Keystore on this device.", style = MaterialTheme.typography.bodySmall)
     }
 }
