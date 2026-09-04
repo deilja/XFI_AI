@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .project_graph import build_graph, graph_context
 from .providers import complete
 
 MAX_FILE_BYTES = 120_000
@@ -30,8 +31,8 @@ PROJECTS = {
 ALLOWED_SERVICES = {cfg["default_service"] for cfg in PROJECTS.values()}
 BLOCKED = (".env", "secret", "credential", "private_key", "id_rsa", ".pem", ".key")
 logger = logging.getLogger(__name__)
-SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты работаешь только с выбранным установленным проектом XFI. Не придумывай файлы/API и не смешивай проекты. Не читай и не меняй секреты. Для анализа верни только JSON: {\"ready\":true/false,\"questions\":[...],\"summary\":\"...\",\"files\":[\"path\"]}. Если данных недостаточно, ready=false и максимум 3 конкретных вопроса."""
-PATCH_PROMPT = """Сформируй минимальные изменения только для выбранного установленного проекта. Верни только JSON: {\"summary\":\"...\",\"edits\":[{\"path\":\"...\",\"content\":\"полное новое содержимое\",\"reason\":\"...\"}],\"tests\":[\"...\"]}. Только существующие безопасные файлы из контекста. Не трогай .env, secrets, credentials, private keys, сертификаты. Максимум 8 файлов. Не меняй другой проект."""
+SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты работаешь только с выбранным установленным проектом XFI. Не придумывай файлы/API и не смешивай проекты. Не читай и не меняй секреты. Учитывай архитектурный граф зависимостей и выбирай связанные файлы, если изменение затрагивает цепочку UI → API → сервис → БД/интеграцию. Для анализа верни только JSON: {\"ready\":true/false,\"questions\":[...],\"summary\":\"...\",\"files\":[\"path\"]}. Если данных недостаточно, ready=false и максимум 3 конкретных вопроса."""
+PATCH_PROMPT = """Сформируй минимальные изменения только для выбранного установленного проекта. Сохраняй существующие контракты и поведение, если запрос явно не требует их изменения. Учитывай архитектурный граф. Верни только JSON: {\"summary\":\"...\",\"edits\":[{\"path\":\"...\",\"content\":\"полное новое содержимое\",\"reason\":\"...\"}],\"tests\":[\"...\"]}. Только существующие безопасные файлы из контекста. Не трогай .env, secrets, credentials, private keys, сертификаты. Максимум 8 файлов. Не меняй другой проект."""
 
 
 def project_config(project: str) -> dict[str, str]:
@@ -126,11 +127,13 @@ async def analyze(project: str, request: str, history: list[dict[str, str]] | No
     cfg = project_config(project)
     tree = files(cfg)
     context = "\n".join(sorted(tree)[:MAX_CONTEXT_FILES])
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Выбранный проект: {cfg['name']}\nТип: {cfg['kind']}\nУстановленный путь: {cfg['path']}\nФайлы:\n{context}\n\nЗапрос:\n{request}"}]
+    graph = await asyncio.to_thread(build_graph, Path(cfg["path"],))
+    architecture = graph_context(graph)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": f"Выбранный проект: {cfg['name']}\nТип: {cfg['kind']}\nУстановленный путь: {cfg['path']}\nФайлы:\n{context}\n\nАрхитектурный граф:\n{architecture}\n\nЗапрос:\n{request}"}]
     messages.extend(history[-MAX_HISTORY:])
     data = parse_json(await ask(messages))
     selected = [str(x) for x in data.get("files", []) if str(x) in tree and safe_path(str(x))][:MAX_FILES]
-    return {"ready": bool(data.get("ready")), "questions": [str(x)[:1000] for x in data.get("questions", [])][:3], "summary": str(data.get("summary", ""))[:3000], "files": selected}
+    return {"ready": bool(data.get("ready")), "questions": [str(x)[:1000] for x in data.get("questions", [])][:3], "summary": str(data.get("summary", ""))[:3000], "files": selected, "architecture": {"node_count": graph["node_count"], "edge_count": graph["edge_count"]}}
 
 
 async def generate_edits(project: str, request: str, answers: list[dict[str, str]]) -> dict[str, Any]:
@@ -143,7 +146,8 @@ async def generate_edits(project: str, request: str, answers: list[dict[str, str
     if not selected:
         raise ValueError("No safe existing files selected")
     context = "\n".join(f"===== {p} =====\n{read(tree[p])}" for p in selected)
-    prompt = f"Проект: {cfg['name']}\nЗапрос: {request}\nУточнения: {json.dumps(answers, ensure_ascii=False)}\nПлан: {analysis['summary']}\nКонтекст:\n{context}"
+    graph = await asyncio.to_thread(build_graph, Path(cfg["path"]))
+    prompt = f"Проект: {cfg['name']}\nЗапрос: {request}\nУточнения: {json.dumps(answers, ensure_ascii=False)}\nПлан: {analysis['summary']}\nАрхитектурный граф: {graph_context(graph)}\nКонтекст:\n{context}"
     data = parse_json(await ask([{"role": "system", "content": PATCH_PROMPT}, {"role": "user", "content": prompt}]))
     raw_edits = data.get("edits", [])
     if not isinstance(raw_edits, list) or not raw_edits or len(raw_edits) > MAX_FILES:
@@ -197,7 +201,6 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
     if not edits or len(edits) > MAX_FILES:
         raise ValueError("Invalid edit set")
     cfg = project_config(project)
-    root = Path(cfg["path"])
     lock = Path(os.getenv(f"XFI_AI_{project.upper()}_EDIT_LOCK", f"/run/lock/xfi-ai-{project}-edit.lock"))
     backup_root = Path(os.getenv("XFI_AI_BACKUP_DIR", "/var/lib/xfi-ai/backups")) / project
     import fcntl
