@@ -7,6 +7,7 @@ import os
 import secrets
 import subprocess  # nosec B404 - only fixed allowlisted local commands are executed
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 import httpx
@@ -34,6 +35,8 @@ from .vps_manager import add_vps, audit, delete_vps, detect, list_vps, safe_rest
 
 ADMIN_KEY = os.getenv("XFI_AI_ADMIN_KEY", "")
 ADMIN_SESSION_TTL = 15 * 60
+ADMIN_LOGIN_WINDOW = 60.0
+ADMIN_LOGIN_MAX_ATTEMPTS = 5
 PROVIDER_DETECT_COOLDOWN = 10.0
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 app = FastAPI(title="XFI AI Gateway", docs_url=None, redoc_url=None)
@@ -47,10 +50,19 @@ OPENCLAW_ALLOWED = {
 }
 _provider_detect_lock = asyncio.Lock()
 _provider_detect_last = 0.0
+_admin_login_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Browser sessions authenticate with the HttpOnly cookie. The API endpoints
+        # already accept X-XFI-Admin-Session, so copy the cookie into the internal
+        # request header without ever exposing the session token in a response.
+        if request.cookies.get("xfi_admin_session") and not request.headers.get("x-xfi-admin-session"):
+            headers = list(request.scope.get("headers", []))
+            headers.append((b"x-xfi-admin-session", request.cookies["xfi_admin_session"].encode()))
+            request.scope["headers"] = headers
+
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -94,6 +106,22 @@ def require_admin(key: str | None, session: str | None = None) -> None:
         raise HTTPException(403, "Forbidden")
 
 
+def _client_ip(request: Request) -> str:
+    # Do not trust X-Forwarded-For here: it is client-controlled unless a trusted
+    # proxy explicitly normalizes it. The socket address is safe for this limiter.
+    return request.client.host if request.client else "unknown"
+
+
+def _check_admin_login_rate(request: Request) -> None:
+    now = time.monotonic()
+    bucket = _admin_login_attempts[_client_ip(request)]
+    while bucket and now - bucket[0] >= ADMIN_LOGIN_WINDOW:
+        bucket.popleft()
+    if len(bucket) >= ADMIN_LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many admin login attempts")
+    bucket.append(now)
+
+
 def require_proxy_key(authorization: str | None) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing API key")
@@ -135,6 +163,7 @@ async def health():
 
 @app.post("/admin/session")
 async def admin_session(request: Request):
+    _check_admin_login_rate(request)
     body = await read_json(request, max_bytes=4096)
     key = str(body.get("key", ""))
     if not ADMIN_KEY or not key or len(key) != len(ADMIN_KEY) or not hmac.compare_digest(key, ADMIN_KEY):
@@ -143,7 +172,6 @@ async def admin_session(request: Request):
     token = _session_token(now, secrets.token_urlsafe(24))
     response = JSONResponse({"ok": True, "expires_in": ADMIN_SESSION_TTL})
     response.set_cookie("xfi_admin_session", token, max_age=ADMIN_SESSION_TTL, httponly=True, secure=True, samesite="strict", path="/")
-    response.headers["X-XFI-Admin-Session"] = token
     return response
 
 
