@@ -18,11 +18,19 @@ data class DashboardStatus(
 data class AiResult(
     val ok: Boolean,
     val summary: String,
+    val stage: String = "",
     val questions: List<String> = emptyList(),
     val files: List<String> = emptyList(),
     val edits: List<EditPreview> = emptyList(),
     val tests: List<String> = emptyList(),
+    val architectureNodes: Int? = null,
+    val architectureEdges: Int? = null,
     val raw: String = ""
 )
 
-data class EditPreview(val path: String, val reason: String)
+data class EditPreview(
+    val path: String,
+    val reason: String,
+    val content: String = "",
+    val expectedSha256: String = ""
+)
