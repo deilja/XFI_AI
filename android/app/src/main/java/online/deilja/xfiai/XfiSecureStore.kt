@@ -1,6 +1,8 @@
 package online.deilja.xfiai
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -8,7 +10,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** Small Keystore-backed store for the short-lived XFI AI admin session. */
+/** Keystore-backed storage for the short-lived XFI AI admin session. */
 class XfiSecureStore(context: Context) {
     private val prefs = context.getSharedPreferences("xfi_ai_secure", Context.MODE_PRIVATE)
     private val keyAlias = "xfi-ai-session-key"
@@ -16,19 +18,26 @@ class XfiSecureStore(context: Context) {
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getKey(keyAlias, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance("AES", "AndroidKeyStore")
-        generator.init(256)
-        return generator.generateKey().also {
-            // KeyGenerator stores the generated key in Android Keystore.
-        }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                keyAlias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
     }
 
     fun saveSession(session: String) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
-        val encrypted = Base64.encodeToString(cipher.doFinal(session.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-        val iv = Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
-        prefs.edit().putString("session", encrypted).putString("iv", iv).apply()
+        prefs.edit()
+            .putString("session", Base64.encodeToString(cipher.doFinal(session.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP))
+            .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .apply()
     }
 
     fun loadSession(): String? = runCatching {
