@@ -47,12 +47,11 @@ def _python_imports(text: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             prefix = "." * node.level
             if node.module:
-                result.append(prefix + node.module)
-                result.extend(
-                    prefix + node.module + "." + alias.name
-                    for alias in node.names
-                    if alias.name != "*"
-                )
+                module = prefix + node.module
+                result.append(module)
+                result.extend(f"{module}.{alias.name}" for alias in node.names if alias.name != "*")
+            else:
+                result.extend(prefix + alias.name for alias in node.names if alias.name != "*")
     return result
 
 
