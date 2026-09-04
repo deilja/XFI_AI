@@ -1,5 +1,6 @@
 package online.deilja.xfiai
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -17,5 +18,19 @@ class XfiAiClientTest {
         assertThrows(IllegalArgumentException::class.java) {
             client.projectStatus("unknown")
         }
+    }
+
+    @Test
+    fun supportedProjectsAreAcceptedByPathContract() {
+        val connect = XfiAiClient("https://example.invalid")
+        val webapp = XfiAiClient("https://example.invalid")
+        assertEquals("connect", connect.javaClass.getDeclaredMethod("projectPath", String::class.java).apply { isAccessible = true }.invoke(connect, "connect"))
+        assertEquals("webapp", webapp.javaClass.getDeclaredMethod("projectPath", String::class.java).apply { isAccessible = true }.invoke(webapp, "webapp"))
+    }
+
+    @Test
+    fun sessionExpiredExceptionHasStableType() {
+        val error = SessionExpiredException()
+        assertEquals("XFI AI admin session expired", error.message)
     }
 }
