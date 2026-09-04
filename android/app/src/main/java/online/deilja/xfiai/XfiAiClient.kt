@@ -65,26 +65,66 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
         return ProjectStatus(json.optString("id", project), json.optString("name", project), json.optBoolean("active", false), if (json.has("health") && !json.isNull("health")) json.optBoolean("health") else null, json.optString("status", "unknown").trim())
     }
 
+    fun analyze(project: String, request: String): AiResult {
+        val connection = connection("/admin/projects/$project/analyze", "POST").jsonRequest()
+        return parseResult(connection, requestBody(request))
+    }
+
+    fun generate(project: String, request: String, answers: List<Answer> = emptyList()): AiResult {
+        val connection = connection("/admin/projects/$project/generate", "POST").jsonRequest()
+        val body = JSONObject().put("request", request).put("answers", answers.toJson())
+        return parseResult(connection, body)
+    }
+
+    fun apply(project: String, edits: List<EditPreview>, restart: Boolean = true): AiResult {
+        require(edits.isNotEmpty()) { "No patch to apply" }
+        val connection = connection("/admin/projects/$project/apply", "POST").jsonRequest()
+        val payload = JSONArray().apply {
+            edits.forEach { edit ->
+                put(JSONObject()
+                    .put("path", edit.path)
+                    .put("content", edit.content)
+                    .put("reason", edit.reason)
+                    .put("expected_sha256", edit.expectedSha256))
+            }
+        }
+        val body = JSONObject().put("confirm", true).put("restart", restart).put("edits", payload)
+        return parseResult(connection, body)
+    }
+
+    /** Compatibility endpoint; production UI uses analyze -> generate -> apply. */
     fun customize(project: String, request: String, confirm: Boolean = false): AiResult {
         require(request.isNotBlank()) { "Request is required" }
-        val connection = connection("/admin/projects/$project/customize", "POST").apply {
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-        }
-        val body = JSONObject().apply { put("request", request); put("confirm", confirm); put("restart", true) }.toString()
-        connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val connection = connection("/admin/projects/$project/customize", "POST").jsonRequest()
+        val body = requestBody(request).put("confirm", confirm).put("restart", true)
+        return parseResult(connection, body)
+    }
+
+    private fun requestBody(request: String) = JSONObject().put("request", request)
+
+    private fun HttpURLConnection.jsonRequest(): HttpURLConnection = apply {
+        doOutput = true
+        setRequestProperty("Content-Type", "application/json")
+    }
+
+    private fun parseResult(connection: HttpURLConnection, body: JSONObject): AiResult {
+        connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
         val text = readText(connection, code)
         checkResponse(code, text)
         val json = runCatching { JSONObject(text) }.getOrElse { return AiResult(false, "Invalid XFI AI response", raw = text) }
         val edits = json.optJSONArray("edits").toEdits()
+        val architecture = json.optJSONObject("architecture")
         return AiResult(
-            ok = json.optBoolean("ok", true),
+            ok = json.optBoolean("ok", json.optBoolean("ready", true)),
             summary = json.optString("summary", json.optString("message", "Request processed")),
+            stage = json.optString("stage", ""),
             questions = json.optJSONArray("questions").toStringList(),
             files = json.optJSONArray("files").toStringList().ifEmpty { edits.map { it.path } },
             edits = edits,
             tests = json.optJSONArray("tests").toStringList(),
+            architectureNodes = architecture?.optInt("node_count"),
+            architectureEdges = architecture?.optInt("edge_count"),
             raw = text
         )
     }
@@ -106,7 +146,13 @@ class XfiAiClient(private val baseUrl: String, private val session: String? = nu
     private fun JSONArray?.toEdits(): List<EditPreview> = if (this == null) emptyList() else buildList {
         for (i in 0 until length()) {
             val item = optJSONObject(i) ?: continue
-            add(EditPreview(item.optString("path"), item.optString("reason")))
+            add(EditPreview(item.optString("path"), item.optString("reason"), item.optString("content"), item.optString("expected_sha256")))
         }
     }
+
+    private fun List<Answer>.toJson() = JSONArray().apply {
+        forEach { put(JSONObject().put("question", it.question).put("answer", it.answer)) }
+    }
 }
+
+data class Answer(val question: String, val answer: String)
