@@ -4,11 +4,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fixed local commands only
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ PROJECTS = {
 }
 ALLOWED_SERVICES = {cfg["default_service"] for cfg in PROJECTS.values()}
 BLOCKED = (".env", "secret", "credential", "private_key", "id_rsa", ".pem", ".key")
+logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """Ты — инженер XFI AI. Ты работаешь только с выбранным установленным проектом XFI. Не придумывай файлы/API и не смешивай проекты. Не читай и не меняй секреты. Для анализа верни только JSON: {\"ready\":true/false,\"questions\":[...],\"summary\":\"...\",\"files\":[\"path\"]}. Если данных недостаточно, ready=false и максимум 3 конкретных вопроса."""
 PATCH_PROMPT = """Сформируй минимальные изменения только для выбранного установленного проекта. Верни только JSON: {\"summary\":\"...\",\"edits\":[{\"path\":\"...\",\"content\":\"полное новое содержимое\",\"reason\":\"...\"}],\"tests\":[\"...\"]}. Только существующие безопасные файлы из контекста. Не трогай .env, secrets, credentials, private keys, сертификаты. Максимум 8 файлов. Не меняй другой проект."""
 
@@ -158,7 +160,7 @@ async def generate_edits(project: str, request: str, answers: list[dict[str, str
 
 
 def _run(cfg: dict[str, str], args: list[str], timeout: int) -> tuple[int, str]:
-    proc = subprocess.run(args, cwd=cfg["path"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)
+    proc = subprocess.run(args, cwd=cfg["path"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)  # nosec B603 - fixed command argv; shell=False
     return proc.returncode, proc.stdout[-12000:]
 
 
@@ -241,8 +243,8 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
             for tmp in tmp_paths:
                 try:
                     tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.warning("Failed to remove temporary edit file %s: %s", tmp, exc)
             for path in reversed(changed):
                 backup = backup_dir / path
                 if backup.exists():
@@ -250,8 +252,8 @@ def apply_edits(project: str, edits: list[dict[str, str]], restart: bool = True)
             if restart:
                 try:
                     _run(cfg, ["systemctl", "restart", cfg["service"]], 20)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to restart service during rollback: %s", exc)
             raise
         finally:
             fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
