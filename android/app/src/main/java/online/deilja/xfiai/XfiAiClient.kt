@@ -12,19 +12,22 @@ class XfiAiClient(
     private val session: String? = null,
     private val openConnection: (String) -> HttpURLConnection = { URL(it).openConnection() as HttpURLConnection }
 ) {
-    init { require(baseUrl.trim().startsWith("https://")) { "XFI AI endpoint must use HTTPS" } }
+    init {
+        require(baseUrl.trim().startsWith("https://")) { "XFI AI endpoint must use HTTPS" }
+    }
 
     private fun projectPath(project: String): String {
         require(project == "connect" || project == "webapp") { "Unsupported project" }
         return project
     }
 
-    private fun connection(path: String, method: String): HttpURLConnection = openConnection(baseUrl.trimEnd('/') + path).apply {
-        requestMethod = method
-        connectTimeout = 10000
-        readTimeout = 60000
-        if (session != null) setRequestProperty("X-Admin-Session", session)
-    }
+    private fun connection(path: String, method: String): HttpURLConnection =
+        openConnection(baseUrl.trimEnd('/') + path).apply {
+            requestMethod = method
+            connectTimeout = 10000
+            readTimeout = 60000
+            if (session != null) setRequestProperty("X-Admin-Session", session)
+        }
 
     fun login(adminKey: String): String {
         require(adminKey.isNotBlank()) { "Admin key is required" }
@@ -34,19 +37,24 @@ class XfiAiClient(
         }
         connection.outputStream.use { it.write(JSONObject().put("key", adminKey).toString().toByteArray(Charsets.UTF_8)) }
         val code = connection.responseCode
+        val cookieHeader = connection.getHeaderField("Set-Cookie").orEmpty()
+        val cookie = cookieHeader
+            .split(',')
+            .asSequence()
+            .map { it.substringBefore(';').trim() }
+            .firstNotNullOfOrNull { value ->
+                value.removePrefix("xfi_admin_session=")
+                    .takeIf { value.startsWith("xfi_admin_session=") && it.isNotBlank() }
+            }
         val text = readText(connection, code)
         if (code !in 200..299) throw IllegalStateException("Login failed ($code): ${errorMessage(text)}")
-        val cookie = connection.getHeaderField("Set-Cookie")
-            ?.substringBefore(';')
-            ?.takeIf { it.startsWith("xfi_admin_session=") }
-            ?.substringAfter('=')
-            ?.takeIf { it.isNotBlank() }
         return cookie ?: throw IllegalStateException("XFI AI did not return an admin session")
     }
 
     fun logout() {
         val connection = connection("/admin/session/logout", "POST")
-        try { connection.responseCode } finally { connection.disconnect() }
+        connection.responseCode
+        connection.disconnect()
     }
 
     fun dashboard(): DashboardStatus {
@@ -84,7 +92,9 @@ class XfiAiClient(
     fun apply(project: String, edits: List<EditPreview>, restart: Boolean = true): AiResult {
         require(edits.isNotEmpty()) { "No patch to apply" }
         val connection = connection("/admin/projects/${projectPath(project)}/apply", "POST").jsonRequest()
-        val payload = JSONArray().apply { edits.forEach { edit -> put(JSONObject().put("path", edit.path).put("content", edit.content).put("reason", edit.reason).put("expected_sha256", edit.expectedSha256)) } }
+        val payload = JSONArray().apply {
+            edits.forEach { edit -> put(JSONObject().put("path", edit.path).put("content", edit.content).put("reason", edit.reason).put("expected_sha256", edit.expectedSha256)) }
+        }
         return parseResult(connection, JSONObject().put("confirm", true).put("restart", restart).put("edits", payload))
     }
 
@@ -110,7 +120,18 @@ class XfiAiClient(
         val json = runCatching { JSONObject(text) }.getOrElse { return AiResult(false, "Invalid XFI AI response", raw = text) }
         val edits = json.optJSONArray("edits").toEdits()
         val architecture = json.optJSONObject("architecture")
-        return AiResult(ok = json.optBoolean("ok", json.optBoolean("ready", true)), summary = json.optString("summary", json.optString("message", "Request processed")), stage = json.optString("stage", ""), questions = json.optJSONArray("questions").toStringList(), files = json.optJSONArray("files").toStringList().ifEmpty { edits.map { it.path } }, edits = edits, tests = json.optJSONArray("tests").toStringList(), architectureNodes = architecture?.optInt("node_count"), architectureEdges = architecture?.optInt("edge_count"), raw = text)
+        return AiResult(
+            ok = json.optBoolean("ok", json.optBoolean("ready", true)),
+            summary = json.optString("summary", json.optString("message", "Request processed")),
+            stage = json.optString("stage", ""),
+            questions = json.optJSONArray("questions").toStringList(),
+            files = json.optJSONArray("files").toStringList().ifEmpty { edits.map { it.path } },
+            edits = edits,
+            tests = json.optJSONArray("tests").toStringList(),
+            architectureNodes = architecture?.optInt("node_count"),
+            architectureEdges = architecture?.optInt("edge_count"),
+            raw = text
+        )
     }
 
     private fun checkResponse(code: Int, text: String) {
@@ -124,7 +145,15 @@ class XfiAiClient(
     }
 
     private fun errorMessage(text: String): String = runCatching { JSONObject(text).optString("detail", text) }.getOrDefault(text).ifBlank { "XFI AI request failed" }
+
     private fun JSONArray?.toStringList(): List<String> = if (this == null) emptyList() else buildList { for (i in 0 until length()) add(optString(i)) }
-    private fun JSONArray?.toEdits(): List<EditPreview> = if (this == null) emptyList() else buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; add(EditPreview(item.optString("path"), item.optString("reason"), item.optString("content"), item.optString("expected_sha256"))) } }
+
+    private fun JSONArray?.toEdits(): List<EditPreview> = if (this == null) emptyList() else buildList {
+        for (i in 0 until length()) {
+            val item = optJSONObject(i) ?: continue
+            add(EditPreview(item.optString("path"), item.optString("reason"), item.optString("content"), item.optString("expected_sha256")))
+        }
+    }
+
     private fun List<Answer>.toJson() = JSONArray().apply { forEach { put(JSONObject().put("question", it.question).put("answer", it.answer)) } }
 }
