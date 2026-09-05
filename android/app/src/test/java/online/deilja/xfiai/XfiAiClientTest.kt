@@ -17,15 +17,21 @@ private class MockConnection(
     private val responseHeaders: Map<String, List<String>> = emptyMap()
 ) : HttpURLConnection(url) {
     val requestBody = ByteArrayOutputStream()
+    private var method = "GET"
+    private val requestProperties = linkedMapOf<String, String>()
 
     override fun connect() = Unit
     override fun disconnect() = Unit
     override fun usingProxy(): Boolean = false
     override fun getResponseCode(): Int = responseCodeValue
-    override fun getInputStream() = ByteArrayInputStream(responseBody.toByteArray())
-    override fun getErrorStream() = if (responseCodeValue >= 400) ByteArrayInputStream(responseBody.toByteArray()) else null
+    override fun getInputStream() = ByteArrayInputStream(responseBody.toByteArray(Charsets.UTF_8))
+    override fun getErrorStream() = if (responseCodeValue >= 400) ByteArrayInputStream(responseBody.toByteArray(Charsets.UTF_8)) else null
     override fun getHeaderFields(): Map<String, List<String>> = responseHeaders
     override fun getOutputStream() = requestBody
+    override fun setRequestMethod(value: String) { method = value }
+    override fun getRequestMethod(): String = method
+    override fun setRequestProperty(key: String, value: String) { requestProperties[key] = value }
+    override fun getRequestProperty(key: String): String? = requestProperties[key]
 }
 
 class XfiAiClientTest {
@@ -82,7 +88,7 @@ class XfiAiClientTest {
                     URL(target), 200,
                     "{\"project\":\"connect\",\"audit\":[{\"action\":\"анализ\"},{\"action\":\"применение\"}]}"
                 )
-                else -> error("Unexpected endpoint: $path")
+                else -> MockConnection(URL(target), 404, "{\"detail\":\"Unexpected endpoint: $path\"}")
             }
             connections += response
             response
