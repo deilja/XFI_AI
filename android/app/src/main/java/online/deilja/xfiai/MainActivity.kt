@@ -97,33 +97,47 @@ private fun XfiAiApp(repository: XfiRepository) {
         Scaffold { padding ->
             Surface(Modifier.fillMaxSize().padding(padding)) {
                 Column(Modifier.fillMaxSize()) {
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                        Text("XFI AI", style = MaterialTheme.typography.headlineMedium)
-                        Text(message)
-                    }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        Screen.entries.forEach { item -> TextButton(onClick = { screen = item }) { Text(item.title) } }
-                    }
+                    Column(Modifier.padding(16.dp)) { Text("XFI AI", style = MaterialTheme.typography.headlineMedium); Text(message) }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) { Screen.entries.forEach { s -> TextButton(onClick = { screen = s }) { Text(s.title) } } }
                     Divider()
                     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         when (screen) {
                             Screen.DASHBOARD -> item { DashboardScreen(dashboard, projectStatus, project, busy, ::refresh) }
                             Screen.AGENT -> item {
-                                AgentScreen(project, request, result, busy, session != null, { project = it; result = null }, { request = it.take(8000) },
+                                AgentScreen(project, request, result, busy, session != null,
+                                    onProject = { project = it; result = null }, onRequest = { request = it.take(8000) },
                                     analyze = {
-                                        val current = session ?: run { message = "Connect first"; return@AgentScreen }
-                                        scope.launch { busy = true; runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).analyze(project, request) } }.onSuccess { result = it; message = "Analysis completed" }.onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Analysis failed" }; busy = false }
+                                        val current = session
+                                        if (current == null) message = "Connect first" else scope.launch {
+                                            busy = true
+                                            runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).analyze(project, request) } }
+                                                .onSuccess { result = it; message = "Analysis completed" }
+                                                .onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Analysis failed" }
+                                            busy = false
+                                        }
                                     },
                                     generate = {
-                                        val current = session ?: run { message = "Connect first"; return@AgentScreen }
-                                        scope.launch { busy = true; runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).generate(project, request) } }.onSuccess { result = it; message = "Patch generated" }.onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Generation failed" }; busy = false }
+                                        val current = session
+                                        if (current == null) message = "Connect first" else scope.launch {
+                                            busy = true
+                                            runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).generate(project, request) } }
+                                                .onSuccess { result = it; message = "Patch generated" }
+                                                .onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Generation failed" }
+                                            busy = false
+                                        }
                                     },
                                     apply = { edits ->
-                                        val current = session ?: run { message = "Connect first"; return@AgentScreen }
-                                        scope.launch { busy = true; runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).apply(project, edits, restart = true) } }.onSuccess { result = it; message = "Patch applied and validated"; refresh() }.onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Apply failed" }; busy = false }
+                                        val current = session
+                                        if (current == null) message = "Connect first" else scope.launch {
+                                            busy = true
+                                            runCatching { withContext(Dispatchers.IO) { XfiAiClient(endpoint, current).apply(project, edits, restart = true) } }
+                                                .onSuccess { result = it; message = "Patch applied and validated"; refresh() }
+                                                .onFailure { if (it is SessionExpiredException) session = null; message = it.message ?: "Apply failed" }
+                                            busy = false
+                                        }
                                     })
                             }
-                            Screen.PROJECTS -> item { ProjectsScreen(project, projectStatus, session != null, busy) { project = it; refresh() } }
+                            Screen.PROJECTS -> item { ProjectsScreen(project, projectStatus, session != null, busy) { id -> project = id; refresh() } }
                             Screen.AUDIT -> item { AuditScreen(audit, session != null, busy, ::refresh) }
                             Screen.SETTINGS -> item { SettingsScreen(endpoint, adminKey, session != null, busy, { endpoint = it }, { adminKey = it }, ::connect, ::disconnect) }
                         }
