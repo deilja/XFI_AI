@@ -3,9 +3,7 @@ package online.deilja.xfiai
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
-import java.net.Proxy
 import java.net.URL
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -51,39 +49,40 @@ class XfiAiClientTest {
         val connections = mutableListOf<MockConnection>()
         var loginCalls = 0
         val factory: (String) -> HttpURLConnection = { target ->
-            val response = when {
-                target.endsWith("/admin/session") -> {
+            val path = URL(target).path
+            val response = when (path) {
+                "/admin/session" -> {
                     loginCalls++
                     MockConnection(
                         URL(target), 200, "{\"ok\":true}",
                         mapOf("Set-Cookie" to listOf("xfi_admin_session=session-123; Path=/; HttpOnly"))
                     )
                 }
-                target.endsWith("/admin/dashboard") -> MockConnection(
+                "/admin/dashboard" -> MockConnection(
                     URL(target), 200,
                     "{\"summary\":{\"integrations_ready\":2,\"integrations_total\":2,\"providers_configured\":3},\"contract\":{\"version\":\"v1\"}}"
                 )
-                target.endsWith("/admin/projects/connect") -> MockConnection(
+                "/admin/projects/connect" -> MockConnection(
                     URL(target), 200,
-                    "{\"id\":\"connect\",\"name\":\"XFI_CONNECT\",\"active\":true,\"status\":\"active\\n\",\"health\":true}"
+                    "{\"id\":\"connect\",\"name\":\"XFI_CONNECT\",\"active\":true,\"status\":\"active\",\"health\":true}"
                 )
-                target.endsWith("/analyze") -> MockConnection(
+                "/admin/projects/connect/analyze" -> MockConnection(
                     URL(target), 200,
                     "{\"ready\":true,\"questions\":[],\"summary\":\"analysis\",\"files\":[\"app.py\"],\"architecture\":{\"node_count\":4,\"edge_count\":3}}"
                 )
-                target.endsWith("/generate") -> MockConnection(
+                "/admin/projects/connect/generate" -> MockConnection(
                     URL(target), 200,
                     "{\"summary\":\"patch\",\"edits\":[{\"path\":\"app.py\",\"reason\":\"request\",\"content\":\"print(1)\",\"expected_sha256\":\"abc\"}],\"tests\":[\"python -m py_compile app.py\"]}"
                 )
-                target.endsWith("/apply") -> MockConnection(
+                "/admin/projects/connect/apply" -> MockConnection(
                     URL(target), 200,
                     "{\"ok\":true,\"project\":\"connect\",\"changed\":[\"app.py\"],\"backup\":\"/backup/id\",\"validation\":{\"ok\":true}}"
                 )
-                target.endsWith("/audit") -> MockConnection(
+                "/admin/projects/connect/audit" -> MockConnection(
                     URL(target), 200,
                     "{\"project\":\"connect\",\"audit\":[{\"action\":\"анализ\"},{\"action\":\"применение\"}]}"
                 )
-                else -> error("Unexpected endpoint: $target")
+                else -> error("Unexpected endpoint: $path")
             }
             connections += response
             response
