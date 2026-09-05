@@ -19,6 +19,9 @@ private class MockConnection(
     val requestBody = ByteArrayOutputStream()
     private var method = "GET"
     private val requestProperties = linkedMapOf<String, String>()
+    private var connectTimeoutValue = 0
+    private var readTimeoutValue = 0
+    private var doOutputValue = false
 
     override fun connect() = Unit
     override fun disconnect() = Unit
@@ -27,11 +30,21 @@ private class MockConnection(
     override fun getInputStream() = ByteArrayInputStream(responseBody.toByteArray(Charsets.UTF_8))
     override fun getErrorStream() = if (responseCodeValue >= 400) ByteArrayInputStream(responseBody.toByteArray(Charsets.UTF_8)) else null
     override fun getHeaderFields(): Map<String, List<String>> = responseHeaders
+    override fun getHeaderField(name: String): String? = responseHeaders.entries
+        .firstOrNull { it.key.equals(name, ignoreCase = true) }
+        ?.value
+        ?.firstOrNull()
     override fun getOutputStream() = requestBody
     override fun setRequestMethod(value: String) { method = value }
     override fun getRequestMethod(): String = method
     override fun setRequestProperty(key: String, value: String) { requestProperties[key] = value }
     override fun getRequestProperty(key: String): String? = requestProperties[key]
+    override fun setConnectTimeout(timeout: Int) { connectTimeoutValue = timeout }
+    override fun getConnectTimeout(): Int = connectTimeoutValue
+    override fun setReadTimeout(timeout: Int) { readTimeoutValue = timeout }
+    override fun getReadTimeout(): Int = readTimeoutValue
+    override fun setDoOutput(value: Boolean) { doOutputValue = value }
+    override fun getDoOutput(): Boolean = doOutputValue
 }
 
 class XfiAiClientTest {
