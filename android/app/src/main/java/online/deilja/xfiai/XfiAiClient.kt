@@ -140,7 +140,7 @@ class XfiAiClient(
 
     private fun readText(connection: HttpURLConnection, code: Int): String {
         val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        return stream?.bufferedReader()?.use { it.readText() }.orEmpty().also { connection.disconnect() }
+        return stream?.bufferedReader()?.use { it.readText() }.orEmpty()
     }
 
     private fun errorMessage(text: String): String = runCatching { JSONObject(text).optString("detail", text) }.getOrDefault(text).ifBlank { "XFI AI request failed" }
