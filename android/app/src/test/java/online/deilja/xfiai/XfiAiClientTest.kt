@@ -86,12 +86,16 @@ class XfiAiClientTest {
         val audit = client.audit("connect")
         assertEquals(2, audit.size)
         assertTrue(audit[0].contains("анализ"))
-        val bodies = connections.map { it.requestBody.toString() }
-        assertTrue(bodies.any { JSONObject(it).optString("key") == "admin-key" })
-        assertTrue(bodies.any { JSONObject(it).optString("request") == "change UI" })
-        assertTrue(bodies.any { val json = JSONObject(it); json.optBoolean("confirm") && !json.optBoolean("restart") && json.optJSONArray("edits")?.length() == 1 })
-        val generateBody = bodies.first { it.contains("\"answers\"") }
-        assertEquals("modern", JSONObject(generateBody).getJSONArray("answers").getJSONObject(0).getString("answer"))
+
+        assertEquals(7, connections.size)
+        assertTrue(connections[0].requestBody.toString().contains("admin-key"))
+        assertEquals("change UI", JSONObject(connections[3].requestBody.toString()).optString("request"))
+        val applyBody = JSONObject(connections[5].requestBody.toString())
+        assertTrue(applyBody.optBoolean("confirm"))
+        assertFalse(applyBody.optBoolean("restart"))
+        assertEquals(1, applyBody.optJSONArray("edits")?.length())
+        val generateBody = JSONObject(connections[4].requestBody.toString())
+        assertEquals("modern", generateBody.getJSONArray("answers").getJSONObject(0).getString("answer"))
     }
 
     @Test
